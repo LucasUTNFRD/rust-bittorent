@@ -1,0 +1,3 @@
+[workspace]
+resolver = "2" # Recommended for new projects
+members = ["bittorent_cli", "bittorent_daemon", "bittorrent_core"]
