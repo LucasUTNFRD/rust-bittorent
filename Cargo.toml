@@ -5,3 +5,4 @@ members = ["bittorent_cli", "bittorent_daemon", "bittorrent_core"]
 [workspace.dependencies]
 anyhow = "1.0"
 thiserror = "2.0"
+tokio = { version = "1", features = ["full"] }

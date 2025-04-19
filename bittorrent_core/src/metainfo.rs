@@ -171,7 +171,6 @@ impl Encode for Info {
             .flat_map(|hash| hash.0.iter())
             .copied()
             .collect();
-        // dbg!(&concatendated_hashes);
         dict.insert(PIECES.to_vec(), Bencode::Bytes(concatendated_hashes));
         Bencode::Dict(dict)
     }
