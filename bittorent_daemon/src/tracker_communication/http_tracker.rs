@@ -1,7 +1,6 @@
 use std::{net::SocketAddrV4, time::Duration};
 
 use bittorrent_core::{bencode::Bencode, types::InfoHash};
-use tracing::debug;
 
 use super::tracker_client::{DEFAULT_PORT, TrackerError};
 

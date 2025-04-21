@@ -2,7 +2,7 @@ use std::{net::SocketAddrV4, path::PathBuf, sync::Arc};
 
 use bittorrent_core::metainfo::Torrent;
 use thiserror::Error;
-use tracing::info;
+use tracing::{debug, info};
 
 use crate::tracker_communication::tracker_client::{TrackerClient, TrackerError};
 
@@ -46,6 +46,7 @@ impl TorrentSession {
             .connect()
             .await
             .map_err(TorrentSessionError::Tracker)?;
+        debug!("{:?}", &resp);
 
         //
         //2. handle inbound connections
