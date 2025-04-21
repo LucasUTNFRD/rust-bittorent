@@ -88,4 +88,8 @@ impl InfoHash {
         hex::decode_to_slice(hex_str, &mut bytes).map_err(InfoHashError::InvalidHexEncoding)?; // Add variant
         Ok(InfoHash(bytes))
     }
+
+    pub fn as_bytes(&self) -> [u8; 20] {
+        self.0
+    }
 }

@@ -1,0 +1,13 @@
+# Example daemon.toml
+
+# Port the daemon listens on for peer connections
+listen_port = 6881 # Overrides the default 6881
+
+# Default directory to save downloaded torrent data
+save_directory = "$HOME/Downloads/"
+
+# Path for the IPC socket
+socket_path = "/tmp/bittorent-protocol.tmp"
+
+# Max peers per torrent session
+max_peer_connections_per_torrent = 50
