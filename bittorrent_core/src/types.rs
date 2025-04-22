@@ -3,7 +3,9 @@ use std::fmt;
 use hex::FromHexError;
 use thiserror::Error;
 
+#[derive(Debug, Clone, Copy)]
 pub struct PeerId(pub [u8; 20]);
+#[derive(Debug)]
 pub struct PieceHash(pub [u8; 20]);
 
 #[derive(Debug, Error, Eq, PartialEq)]

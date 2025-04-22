@@ -10,6 +10,7 @@ use crate::{
 
 pub struct Torrent {
     pub announce: String,
+    // pub announce_list: Option<Vec<Vec<String>>>, // TODO: CHECK [BEP_0012](https://www.bittorrent.org/beps/bep_0012.html)
     pub info: Info,
     pub info_hash: InfoHash,
 }
@@ -57,6 +58,7 @@ const PIECE_LENGTH: &[u8] = b"piece length";
 const PIECES: &[u8] = b"pieces";
 
 const ANNOUNCE: &[u8] = b"announce";
+const ANNOUNCE_LIST: &[u8] = b"announce-list";
 const INFO: &[u8] = b"info";
 
 impl Torrent {
