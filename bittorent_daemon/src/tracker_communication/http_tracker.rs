@@ -1,13 +1,16 @@
 use std::{net::SocketAddrV4, time::Duration};
 
-use bittorrent_core::{bencode::Bencode, types::InfoHash};
+use bittorrent_core::{
+    bencode::Bencode,
+    types::{InfoHash, PeerId},
+};
 
 use super::tracker_client::{DEFAULT_PORT, TrackerError};
 
 #[derive(Debug)]
 pub struct TrackerRequest {
     info_hash: InfoHash,
-    peer_id: [u8; 20],
+    peer_id: PeerId,
     port: u16,
     uploaded: u64,
     downloaded: u64,
@@ -25,7 +28,7 @@ pub enum Event {
 }
 
 impl TrackerRequest {
-    pub fn new(info_hash: InfoHash, peer_id: [u8; 20], left: u64, event: Event) -> Self {
+    pub fn new(info_hash: InfoHash, peer_id: PeerId, left: u64, event: Event) -> Self {
         Self {
             info_hash,
             peer_id,
@@ -41,12 +44,8 @@ impl TrackerRequest {
     pub fn build_url(&self, announce_url_str: &str) -> Result<reqwest::Url, TrackerError> {
         let mut url = reqwest::Url::parse(announce_url_str).unwrap();
 
-        // Use urlencoding::encode_binary on the raw bytes
         let info_hash_encoded = urlencoding::encode_binary(&self.info_hash.0); // Access inner bytes
-        // If peer_id remains [u8; 20] in TrackerRequest:
-        let peer_id_encoded = urlencoding::encode_binary(&self.peer_id);
-        // If you change peer_id to PeerId type in TrackerRequest:
-        // let peer_id_encoded = urlencoding::encode_binary(&self.peer_id.0);
+        let peer_id_encoded = urlencoding::encode_binary(&self.peer_id.0);
 
         let mut query_string = format!(
             "info_hash={}&peer_id={}&port={}&uploaded={}&downloaded={}&left={}&compact={}",
@@ -109,7 +108,6 @@ impl TrackerResponse {
             }
         };
 
-        // Check for failure reason first
         if let Some(reason_val) = response_dict.get(FAILURE_REASON_KEY) {
             if let Bencode::Bytes(reason_bytes) = reason_val {
                 // Attempt to convert bytes to String, handle potential UTF-8 error
@@ -127,8 +125,6 @@ impl TrackerResponse {
                 ));
             }
         }
-
-        // --- Extract required fields ---
 
         // Interval
         let interval_val = response_dict
@@ -198,7 +194,7 @@ impl TrackerResponse {
         let mut peers = Vec::new();
         for chunk in bytes.chunks(6) {
             if chunk.len() != 6 {
-                continue; // Skip incomplete chunks
+                continue;
             }
             let ip = SocketAddrV4::new(
                 std::net::Ipv4Addr::new(chunk[0], chunk[1], chunk[2], chunk[3]),

@@ -1,78 +1,113 @@
-use std::{net::SocketAddrV4, path::PathBuf, sync::Arc};
+use std::{
+    collections::HashMap,
+    net::SocketAddrV4,
+    sync::{Arc, RwLock},
+};
 
-use bittorrent_core::metainfo::Torrent;
-use thiserror::Error;
 use tracing::{debug, info};
 
-use crate::tracker_communication::tracker_client::{TrackerClient, TrackerError};
+use bittorrent_core::{metainfo::Torrent, types::PeerId};
+use tokio::{
+    select,
+    sync::mpsc::{self, Sender},
+    time::{Instant, interval_at},
+};
+
+use crate::{
+    peer_connection::PeerConnection,
+    tracker_communication::tracker_client::{TrackerClient, TrackerMessage},
+};
 
 pub struct TorrentSession {
+    /// mailbox for communication with the daemon
+    session_rx: mpsc::Receiver<TorrentSessionMsg>,
     torrent: Arc<Torrent>,
-    save_dir: PathBuf,
-    port: u16,
+    active_peers: RwLock<HashMap<SocketAddrV4, PeerConnection>>,
+    // piece_manager: Arc<PieceManagerHandler>,
+    tracker_ref: Option<Sender<TrackerMessage>>,
+    // disk_io: Arc<DiskIOHandler>,
 }
 
-#[derive(Debug, Error)]
+#[derive(Clone)]
+pub struct SessionHanlde {
+    sender: mpsc::Sender<TorrentSessionMsg>,
+}
+
+pub enum TorrentSessionMsg {
+    Pause,
+    Resume,
+}
+
 pub enum TorrentSessionError {
-    #[error("Tracker Error: {0}")]
-    Tracker(TrackerError),
+    Example,
 }
 
 impl TorrentSession {
-    pub fn new(torrent: Arc<Torrent>, save_dir: PathBuf, port: u16) -> Self {
+    fn new(session_rx: mpsc::Receiver<TorrentSessionMsg>, torrent: Arc<Torrent>) -> Self {
         Self {
+            session_rx,
             torrent,
-            save_dir,
-            port,
+            active_peers: RwLock::new(HashMap::new()),
+            tracker_ref: None,
         }
     }
-
-    pub async fn start_running_session(&mut self) -> Result<(), TorrentSessionError> {
-        info!(
-            "Started running a new torrent session {:?}",
-            self.torrent.info.name
-        );
-
-        //1. Contact a a tracker
-        let (tracker_client, client_tx) = TrackerClient::new(
+    pub async fn start(mut self) -> Result<(), TorrentSessionError> {
+        //1. contact tracker
+        info!("Announcing to tracker");
+        let (tracker, tracker_tx) = TrackerClient::new(
             self.torrent.announce.clone(),
             self.torrent.info_hash,
-            self.port,
+            6881,
             self.torrent.info.length as u64,
         );
 
-        info!("Trying to cnnect with tracker");
-        let resp = tracker_client
-            .connect()
-            .await
-            .map_err(TorrentSessionError::Tracker)?;
-        debug!("{:?}", &resp);
+        let resp = tracker.connect().await.unwrap();
 
-        //
-        //2. handle inbound connections
+        debug!("Got from tracker {:?}", resp);
 
-        //
-        //3. handle outbound connections
-        info!("Here received a resp from tracker");
-        self.handle_outbound_peer(resp.peers).await;
-        Ok(())
+        self.tracker_ref = Some(tracker_tx);
+
+        let mut announce_interval = interval_at(Instant::now() + resp.interval, resp.interval);
+        info!(
+            "Announcing to tracker in next interval at:{:?}",
+            announce_interval
+        );
+
+        self.handle_outboud_peers(resp.peers).await;
+
+        loop {
+            select! {
+                Some(msg) = self.session_rx.recv() => {
+                    self.handle_message(msg).await?
+                }
+                _ = announce_interval.tick() => {
+                    info!("Time to announce to Tracker Client");
+                }
+            }
+        }
     }
 
-    /// Remote peer initiated the connection to our client
-    /// Another peer in the swarm actively reached out to our client's listening port
-    /// and established a TCP connection.
-    async fn handle_inbound_peer() {}
+    async fn handle_message(&mut self, msg: TorrentSessionMsg) -> Result<(), TorrentSessionError> {
+        match msg {
+            TorrentSessionMsg::Pause => todo!(),
+            TorrentSessionMsg::Resume => todo!(),
+        }
+    }
 
-    /// Our client initated the connection to the remote peer
-    /// this usually happens when your client receives a list of peers from a tracker
-    async fn handle_outbound_peer(&self, peers: Vec<SocketAddrV4>) {
-        info!("We should connect to the following peers");
-        for peer in peers.iter() {
-            info!("Peer {:?}", peer);
+    /// Spawn PeerConnection Actors to start torrent download
+    async fn handle_outboud_peers(&self, peers: Vec<SocketAddrV4>) {
+        for peer in peers {
+            info!("Should connect to Peer{:?}", peer);
         }
     }
 }
 
-// TODO:
-// Objective 1: via cli add a torrent, the daemon starts  a new torrent session, then contacts
-// tracker to get peers, just print peers
+impl SessionHanlde {
+    pub fn new(torrent: Arc<Torrent>) -> Self {
+        let (tx, rx) = mpsc::channel(32);
+        let torrent_session = TorrentSession::new(rx, torrent);
+        tokio::spawn(torrent_session.start());
+
+        Self { sender: tx }
+    }
+}

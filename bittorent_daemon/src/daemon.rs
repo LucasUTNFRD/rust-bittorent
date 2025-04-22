@@ -1,6 +1,5 @@
 use std::{
     collections::HashMap,
-    env,
     fs::remove_file,
     path::{Path, PathBuf},
     sync::Arc,
@@ -8,31 +7,25 @@ use std::{
 
 use anyhow::{Context, Result};
 use bincode::{Decode, Encode, config};
-use bittorrent_core::torrent_parser::TorrentParser;
+use bittorrent_core::{metainfo::Torrent, torrent_parser::TorrentParser, types::InfoHash};
 use tokio::{
     io::AsyncReadExt,
     net::{UnixListener, UnixStream},
-    spawn,
-    sync::mpsc,
-    task::JoinHandle,
 };
 use tracing::{error, info, warn};
 
-use crate::{config::Settings, error::Error, torrent_session::TorrentSession};
-
-struct SessionHanlde {
-    join_hanlde: JoinHandle<()>,
-    // sesssion_tx: mpsc::Sender<TorrentSessionMsg>,
-}
+use crate::{
+    config::Settings,
+    error::ClientError,
+    torrent_session::{SessionHanlde, TorrentSession},
+};
 
 type TorrentId = String;
 
 pub struct Daemon {
     client_cfg: Settings,
-    sessions: HashMap<TorrentId, SessionHanlde>,
+    sessions: HashMap<InfoHash, SessionHanlde>,
 }
-
-const SOCKET_PATH: &str = "/tmp/bittorent-protocol.tmp";
 
 /// Message types for main client controller
 pub enum ClientMsg {}
@@ -45,7 +38,7 @@ impl Daemon {
         }
     }
 
-    pub async fn run(&mut self) -> Result<()> {
+    pub async fn run(&mut self) -> Result<(), ClientError> {
         let sock_path = Path::new(&self.client_cfg.socket_path);
         if sock_path.exists() {
             match remove_file(sock_path) {
@@ -57,8 +50,8 @@ impl Daemon {
                 }
             }
         }
-        let listener = UnixListener::bind(SOCKET_PATH).unwrap();
-        info!("Daemon listening on {}", SOCKET_PATH);
+        let listener = UnixListener::bind(sock_path).unwrap();
+        info!("Daemon listening on {:?}", &sock_path);
 
         // 3. Accept connections in a loop
         loop {
@@ -76,7 +69,7 @@ impl Daemon {
         }
     }
 
-    async fn handle_connection(&mut self, mut stream: UnixStream) -> Result<()> {
+    async fn handle_connection(&mut self, mut stream: UnixStream) -> Result<(), ClientError> {
         let config = config::standard();
 
         // Read message length (4 bytes, big-endian u32)
@@ -84,7 +77,8 @@ impl Daemon {
         stream
             .read_exact(&mut len_buf)
             .await
-            .context("Failed to read message length from stream")?;
+            .map_err(ClientError::IO)?;
+
         let msg_len = u32::from_be_bytes(len_buf) as usize;
         // debug!("Received message length: {}", msg_len);
 
@@ -93,12 +87,12 @@ impl Daemon {
         stream
             .read_exact(&mut msg_buf)
             .await
-            .context("Failed to read message body from stream")?;
+            .map_err(ClientError::IO)?;
         // debug!("Read {} message bytes", msg_buf.len());
 
         // Deserialize the message
-        let (msg, _consumed): (DaemonMsg, usize) = bincode::decode_from_slice(&msg_buf, config)
-            .context("Failed to deserialize DaemonMsg")?;
+        let (msg, _consumed): (DaemonMsg, usize) =
+            bincode::decode_from_slice(&msg_buf, config).map_err(ClientError::Decode)?;
 
         info!("Message recv:{:?}", &msg);
 
@@ -107,49 +101,39 @@ impl Daemon {
         Ok(())
     }
 
-    async fn handle_message(&mut self, msg: DaemonMsg) -> Result<(), Error> {
+    async fn handle_message(&mut self, msg: DaemonMsg) -> Result<(), ClientError> {
         match msg {
             DaemonMsg::AddTorrent(torrent_filename) => {
-                // info!("Torrent dir as string:{torrent_dir}");
-                // let mut filepath = PathBuf::from();
-                // let path = Path::new(&torrent_dir);
-                // filepath.push(path);
-                // if !filepath.exists() {
-                //     warn!("Non-existing file{}");
-                //     return Err(Error::InvalidTorrent);
-                // }
-                let base_dir = PathBuf::from("./sample_torrents");
-                let torrent_path = base_dir.join(&torrent_filename); // Join base dir and filename
-
-                info!("Looking for torrent file at: {:?}", torrent_path);
-
-                // Check if the constructed path exists
-                if !torrent_path.exists() {
-                    error!("Torrent file does not exist at path: {:?}", torrent_path);
-                    // Return a specific error indicating the file wasn't found where expected
-                    // You might want to add a new variant to your Error enum for this
-                    return Err(Error::InvalidTorrent); // Or a more specific error
-                }
-                if !torrent_path.is_file() {
-                    error!("Specified path is not a file: {:?}", torrent_path);
-                    return Err(Error::InvalidTorrent); // Or a more specific error
-                }
-
-                let torrent_file = Arc::new(TorrentParser::parse(&torrent_path).unwrap());
-                let mut session = TorrentSession::new(
-                    torrent_file,
-                    self.client_cfg.save_directory.clone(),
-                    self.client_cfg.listen_port,
-                );
-
-                spawn(async move {
-                    let _ = session.start_running_session().await;
-                    Ok::<(), Error>(())
-                });
-
-                Ok(())
+                let _ = self.add_torrent(&torrent_filename).await;
             }
         }
+        Ok(())
+    }
+
+    async fn add_torrent(&mut self, filename: &str) -> Result<(), ClientError> {
+        let base_dir = PathBuf::from("./sample_torrents");
+        let torrent_path = base_dir.join(filename); // Join base dir and filename
+
+        info!("Looking for torrent file at: {:?}", torrent_path);
+
+        if !torrent_path.exists() {
+            error!("Torrent file does not exist at path: {:?}", torrent_path);
+            return Err(ClientError::InvalidTorrent);
+        }
+        if !torrent_path.is_file() {
+            error!("Specified path is not a file: {:?}", torrent_path);
+            return Err(ClientError::InvalidTorrent);
+        }
+
+        let parsed_torrent =
+            TorrentParser::parse(&torrent_path).map_err(ClientError::TorrentParsing)?;
+
+        let torrent_file = Arc::new(parsed_torrent);
+
+        let session_handle = SessionHanlde::new(torrent_file.clone());
+        self.sessions.insert(torrent_file.info_hash, session_handle);
+
+        Ok(())
     }
 }
 

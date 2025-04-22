@@ -1,15 +1,14 @@
 use bittorrent_core::{
     bencode::{Bencode, BencodeError},
-    types::InfoHash,
+    types::{InfoHash, PeerId},
 };
 use thiserror::Error;
 use tokio::sync::mpsc::{self, Sender};
-use tracing::debug;
 
 pub struct TrackerClient {
     pub announce_url: String,
     pub info_hash: InfoHash,
-    pub peer_id: [u8; 20], //unique id for this client
+    pub peer_id: PeerId,
     pub port: u16,
 
     //Tracking of torrrent
@@ -51,17 +50,17 @@ pub enum TrackerError {
 }
 
 use rand::Rng;
-use tracing::{field::debug, info};
+use tracing::{debug, field::debug, info};
 
 pub const DEFAULT_PORT: u16 = 6881;
 
 use super::http_tracker::{Event, TrackerRequest, TrackerResponse};
 
-fn generate_peer_id() -> [u8; 20] {
+fn generate_peer_id() -> PeerId {
     let mut peer_id = [0u8; 20];
     peer_id[0..3].copy_from_slice(b"-RS"); // Client identifier
     rand::rng().fill(&mut peer_id[3..]); // Random bytes
-    peer_id
+    PeerId(peer_id)
 }
 
 // --- Tracker Actor Implementation ---
@@ -91,19 +90,16 @@ impl TrackerClient {
 
     pub async fn connect(&self) -> Result<TrackerResponse, TrackerError> {
         let request = TrackerRequest::new(self.info_hash, self.peer_id, self.left, Event::Started);
-        debug!("{:?}", &request);
 
         let query_url = request.build_url(&self.announce_url)?;
-        debug!("{:?}", &query_url);
+        debug!("Query:{:?}", query_url);
 
-        info!("here");
         let resp = reqwest::get(query_url)
             .await
             .map_err(TrackerError::HttpRequest)?
             .bytes()
             .await
             .map_err(TrackerError::Bytes)?;
-        info!("here");
 
         let bencoded_resp = Bencode::decode(&resp).map_err(TrackerError::Bencode)?;
         let resp = TrackerResponse::from_bencode(&bencoded_resp)?;
@@ -113,6 +109,7 @@ impl TrackerClient {
         Ok(resp)
     }
 
+    // TODO: Implement this so the torrent communicates only via messages
     pub async fn run(&mut self) {
         todo!("Not implemented yet")
     }

@@ -1,5 +1,3 @@
-// src/config.rs (or within daemon.rs/main.rs initially)
-
 use serde::Deserialize;
 use std::path::PathBuf;
 
@@ -13,7 +11,6 @@ pub struct Settings {
     pub socket_path: String,
     #[serde(default = "default_max_peers")]
     pub max_peer_connections_per_torrent: usize,
-    // Add other settings: log level, max download/upload speed, etc.
 }
 
 pub fn default_listen_port() -> u16 {
@@ -46,13 +43,7 @@ impl Settings {
         ); // Log path
 
         let s = config::Config::builder()
-            // 1. Start with default values (built into your struct via #[serde(default = ...)])
-            // (The config crate doesn't directly use struct defaults, but they apply during deserialization)
-            // 2. Add configuration file(s).
-            //    .add_source() returns the builder, files are optional.
             .add_source(config::File::with_name(config_file_path_str).required(false))
-            // 3. Add environment variables (optional).
-            //    Prefix with `APP_` (e.g., `APP_LISTEN_PORT=8000`), Clap uses `_` separators
             .add_source(config::Environment::with_prefix("BT_DAEMON").separator("_"))
             .build()?;
 
@@ -60,3 +51,5 @@ impl Settings {
         s.try_deserialize()
     }
 }
+
+//TODO: Improve this file
