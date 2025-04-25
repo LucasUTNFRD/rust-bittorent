@@ -15,7 +15,7 @@ pub enum Message {
     Have {
         piece_index: u32,
     },
-    Bitfield(Bitfield),
+    Bitfield(Vec<u8>),
     Request(BlockInfo),
     Piece(Block),
     Cancel(BlockInfo),
@@ -36,11 +36,6 @@ pub struct Block {
     block: Vec<u8>,
 }
 
-#[derive(Debug, Clone)]
-struct Bitfield {
-    bitvec: Vec<u8>,
-}
-
 const PSTRLEN: u8 = 19;
 const PSTR: &[u8; 19] = b"BitTorrent protocol";
 
@@ -57,26 +52,38 @@ impl Message {
                 buf.put_slice(&info_hash.as_bytes());
                 buf.put_slice(&peer_id.0);
             }
+            //  <length prefix><message ID><payload>
             Message::KeepAlive => {
-                todo!()
+                buf.put_u32(0);
             }
             Message::Choke => {
-                todo!()
+                buf.put_u32(1); // LEN:[0,0,0,1]
+                buf.put_u8(0); // ID: 0
             }
             Message::Unchoke => {
-                todo!()
+                buf.put_u32(1); // LEN:[0,0,0,1]
+                buf.put_u8(1); // ID: 1
             }
             Message::Interested => {
-                todo!()
+                buf.put_u32(1); // LEN:[0,0,0,1]
+                buf.put_u8(2); // ID: 2
             }
             Message::NotInterested => {
-                todo!()
+                buf.put_u32(1); // LEN:[0,0,0,1]
+                buf.put_u8(3); // ID: 3
             }
             Message::Have { piece_index } => {
-                todo!()
+                // have: <len=0005><id=4><piece index>
+                buf.put_u32(5); // LEN:[0,0,0,5]
+                buf.put_u8(4); // ID: 4
+                buf.put_u32(*piece_index);
             }
             Message::Bitfield(bitfield) => {
-                todo!()
+                // bitfield: <len=0001+X><id=5><bitfield>
+                let bitfield_len = bitfield.len();
+                buf.put_u32(1 + bitfield_len as u32); // LEN:[0,0,0,1+X]
+                buf.put_u8(5); // ID: 5
+                buf.put_slice(bitfield);
             }
             Message::Request(block_info) => {
                 todo!()
@@ -105,10 +112,7 @@ mod tests {
         let info_hash = InfoHash([
             1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
         ]);
-        let handshake = Message::Handshake {
-            peer_id: peer_id,
-            info_hash: info_hash,
-        };
+        let handshake = Message::Handshake { peer_id, info_hash };
         let mut buf = BytesMut::with_capacity(68); // Handshake is exactly 68 bytes
         handshake.to_bytes(&mut buf);
 
@@ -132,5 +136,108 @@ mod tests {
 
         // The total buffer should be exactly 68 bytes
         assert_eq!(buf.len(), 68);
+    }
+
+    #[test]
+    fn keep_alive_serialization() {
+        let keep_alive = Message::KeepAlive;
+        let mut buf = BytesMut::with_capacity(4); // KeepAlive is exactly 4 bytes
+        keep_alive.to_bytes(&mut buf);
+
+        // Verify the structure of the keep_alive:
+        // 1. First 4 bytes should be the length prefix (0)
+        assert_eq!(buf[0..4], [0, 0, 0, 0]);
+
+        // The total buffer should be exactly 4 bytes
+        assert_eq!(buf.len(), 4);
+    }
+
+    #[test]
+    fn choke_serialization() {
+        let choke = Message::Choke;
+        let mut buf = BytesMut::with_capacity(5); // Choke is exactly 5 bytes
+        choke.to_bytes(&mut buf);
+
+        // Verify the structure of the choke:
+        // 1. First 4 bytes should be the length prefix (1)
+        assert_eq!(buf[0..4], [0, 0, 0, 1]);
+
+        // 2. Next byte should be the ID (0)
+        assert_eq!(buf[4], 0);
+
+        // The total buffer should be exactly 5 bytes
+        assert_eq!(buf.len(), 5);
+    }
+
+    #[test]
+    fn unchoke_serialization() {
+        let unchoke = Message::Unchoke;
+        let mut buf = BytesMut::with_capacity(5); // Unchoke is exactly 5 bytes
+        unchoke.to_bytes(&mut buf);
+
+        // Verify the structure of the unchoke:
+        // 1. First 4 bytes should be the length prefix (1)
+        assert_eq!(buf[0..4], [0, 0, 0, 1]);
+
+        // 2. Next byte should be the ID (1)
+        assert_eq!(buf[4], 1);
+
+        // The total buffer should be exactly 5 bytes
+        assert_eq!(buf.len(), 5);
+    }
+
+    #[test]
+    fn interested_serialization() {
+        let interested = Message::Interested;
+        let mut buf = BytesMut::with_capacity(5); // Interested is exactly 5 bytes
+        interested.to_bytes(&mut buf);
+
+        // Verify the structure of the interested:
+        // 1. First 4 bytes should be the length prefix (1)
+        assert_eq!(buf[0..4], [0, 0, 0, 1]);
+
+        // 2. Next byte should be the ID (2)
+        assert_eq!(buf[4], 2);
+
+        // The total buffer should be exactly 5 bytes
+        assert_eq!(buf.len(), 5);
+    }
+
+    #[test]
+    fn not_interested_serialization() {
+        let not_interested = Message::NotInterested;
+        let mut buf = BytesMut::with_capacity(5); // NotInterested is exactly 5 bytes
+        not_interested.to_bytes(&mut buf);
+
+        // Verify the structure of the not_interested:
+        // 1. First 4 bytes should be the length prefix (1)
+        assert_eq!(buf[0..4], [0, 0, 0, 1]);
+
+        // 2. Next byte should be the ID (3)
+        assert_eq!(buf[4], 3);
+
+        // The total buffer should be exactly 5 bytes
+        assert_eq!(buf.len(), 5);
+    }
+
+    #[test]
+    fn bitfield_serialization() {
+        let bitfield = vec![0, 1, 2, 3];
+        let message = Message::Bitfield(bitfield);
+        let mut buf = BytesMut::with_capacity(9); // Bitfield is exactly 9 bytes
+        message.to_bytes(&mut buf);
+
+        // Verify the structure of the bitfield:
+        // 1. First 4 bytes should be the length prefix (5)
+        assert_eq!(buf[0..4], [0, 0, 0, 5]);
+
+        // 2. Next byte should be the ID (5)
+        assert_eq!(buf[4], 5);
+
+        // 3. Next 4 bytes should be the bitfield data (0x01020304)
+        assert_eq!(buf[5..9], [0, 1, 2, 3]);
+
+        // The total buffer should be exactly 9 bytes
+        assert_eq!(buf.len(), 9);
     }
 }

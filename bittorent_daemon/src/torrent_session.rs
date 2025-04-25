@@ -98,6 +98,10 @@ impl TorrentSession {
     async fn handle_outboud_peers(&self, peers: Vec<SocketAddrV4>) {
         for peer in peers {
             info!("Should connect to Peer{:?}", peer);
+            // spawn a tokio task
+            // connect with the peer
+            // try to perform a handhsake
+            // tokio::spawn()
         }
     }
 }
