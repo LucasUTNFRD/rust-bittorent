@@ -8,6 +8,26 @@ pub struct PeerId(pub [u8; 20]);
 #[derive(Debug)]
 pub struct PieceHash(pub [u8; 20]);
 
+impl TryFrom<&[u8]> for PeerId {
+    type Error = PeerIdError;
+
+    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
+        if value.len() == 20 {
+            let mut bytes = [0u8; 20];
+            bytes.copy_from_slice(value);
+            Ok(PeerId(bytes))
+        } else {
+            Err(PeerIdError::InvalidLenght)
+        }
+    }
+}
+
+#[derive(Debug, Error, Eq, PartialEq)]
+pub enum PeerIdError {
+    #[error("Invalid Lenght")]
+    InvalidLenght,
+}
+
 #[derive(Debug, Error, Eq, PartialEq)]
 pub enum PieceHashError {
     #[error("Invalid Lenght")]

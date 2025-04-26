@@ -1,10 +1,11 @@
 use std::{
     collections::HashMap,
     net::SocketAddrV4,
-    sync::{Arc, RwLock},
+    sync::{Arc, RwLock, atomic::AtomicUsize},
     time::Duration,
 };
 
+use anyhow::Ok;
 use tracing::{debug, info, warn};
 
 use bittorrent_core::{metainfo::Torrent, types::PeerId};
@@ -27,6 +28,9 @@ pub struct TorrentSession {
     active_peers: RwLock<HashMap<SocketAddrV4, PeerConnection>>,
     // piece_manager: Arc<PieceManagerHandler>,
     tracker_ref: Option<Sender<TrackerMessage>>,
+    client_peer_id: PeerId,
+    active_outgoing_connections: Arc<AtomicUsize>,
+    // client_config: Arc<
     // disk_io: Arc<DiskIOHandler>,
 }
 
@@ -45,12 +49,18 @@ pub enum TorrentSessionError {
 }
 
 impl TorrentSession {
-    fn new(session_rx: mpsc::Receiver<TorrentSessionMsg>, torrent: Arc<Torrent>) -> Self {
+    fn new(
+        session_rx: mpsc::Receiver<TorrentSessionMsg>,
+        torrent: Arc<Torrent>,
+        client_peer_id: PeerId,
+    ) -> Self {
         Self {
             session_rx,
             torrent,
             active_peers: RwLock::new(HashMap::new()),
             tracker_ref: None,
+            client_peer_id,
+            active_outgoing_connections: Arc::new(AtomicUsize::new(0)),
         }
     }
     pub async fn start(mut self) -> Result<(), TorrentSessionError> {
@@ -61,6 +71,7 @@ impl TorrentSession {
             self.torrent.info_hash,
             6881,
             self.torrent.info.length as u64,
+            self.client_peer_id,
         );
 
         let resp = tracker.connect().await.unwrap();
@@ -98,38 +109,23 @@ impl TorrentSession {
 
     /// Spawn PeerConnection Actors to start torrent download
     async fn handle_outboud_peers(&self, peers: Vec<SocketAddrV4>) {
+        let peer_id = self.client_peer_id;
+        let info_hash = self.torrent.info_hash;
         for peer_addr in peers {
             info!("Should connect to Peer{:?}", peer_addr);
             tokio::spawn(async move {
-                let stream =
-                    match timeout(Duration::from_secs(10), TcpStream::connect(peer_addr)).await {
-                        Ok(connect_result) => match connect_result {
-                            Ok(s) => {
-                                info!("Connected succesfully to peer:{}", peer_addr);
-                                s
-                            }
-                            Err(e) => {
-                                debug!("[{}] TCP connection failed: {}", peer_addr, e);
-                                return; // Permit released automatically
-                            }
-                        },
-
-                        Err(_) => {
-                            debug!("[{}] TCP connection timed out.", peer_addr);
-                            return;
-                        }
-                    };
-
-                // let peer_connection = PeerConnection::new(stream, info_hash, our_peer_id);
+                if let Err(e) = PeerConnection::spawn(peer_addr, peer_id, info_hash).await {
+                    warn!("Failed to spawn PeerConnection: {:?}", e);
+                }
             });
         }
     }
 }
 
 impl SessionHanlde {
-    pub fn new(torrent: Arc<Torrent>) -> Self {
+    pub fn new(torrent: Arc<Torrent>, client_peer_id: PeerId) -> Self {
         let (tx, rx) = mpsc::channel(32);
-        let torrent_session = TorrentSession::new(rx, torrent);
+        let torrent_session = TorrentSession::new(rx, torrent, client_peer_id);
         tokio::spawn(torrent_session.start());
 
         Self { sender: tx }

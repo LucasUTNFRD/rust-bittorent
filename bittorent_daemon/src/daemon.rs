@@ -7,7 +7,11 @@ use std::{
 
 use anyhow::{Context, Result};
 use bincode::{Decode, Encode, config};
-use bittorrent_core::{metainfo::Torrent, torrent_parser::TorrentParser, types::InfoHash};
+use bittorrent_core::{
+    metainfo::Torrent,
+    torrent_parser::TorrentParser,
+    types::{InfoHash, PeerId},
+};
 use tokio::{
     io::AsyncReadExt,
     net::{UnixListener, UnixStream},
@@ -25,16 +29,26 @@ type TorrentId = String;
 pub struct Daemon {
     client_cfg: Settings,
     sessions: HashMap<InfoHash, SessionHanlde>,
+    client_peer_id: PeerId,
 }
 
 /// Message types for main client controller
 pub enum ClientMsg {}
 
+use rand::Rng;
+
+fn generate_peer_id() -> PeerId {
+    let mut peer_id = [0u8; 20];
+    peer_id[0..3].copy_from_slice(b"-RS"); // Client identifier
+    rand::rng().fill(&mut peer_id[3..]); // Random bytes
+    PeerId(peer_id)
+}
 impl Daemon {
     pub fn new(client_cfg: Settings) -> Self {
         Self {
             client_cfg,
             sessions: HashMap::new(),
+            client_peer_id: generate_peer_id(),
         }
     }
 
@@ -130,7 +144,7 @@ impl Daemon {
 
         let torrent_file = Arc::new(parsed_torrent);
 
-        let session_handle = SessionHanlde::new(torrent_file.clone());
+        let session_handle = SessionHanlde::new(torrent_file.clone(), self.client_peer_id.clone());
         self.sessions.insert(torrent_file.info_hash, session_handle);
 
         Ok(())

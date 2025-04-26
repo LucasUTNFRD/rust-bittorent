@@ -70,8 +70,9 @@ impl TrackerClient {
         info_hash: InfoHash,
         port: u16,
         torrent_len: u64,
+        peer_id: PeerId,
     ) -> (Self, Sender<TrackerMessage>) {
-        let peer_id = generate_peer_id();
+        // let peer_id = generate_peer_id();
         let (tx, rx) = mpsc::channel(32);
         let client = TrackerClient {
             announce_url,
