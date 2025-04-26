@@ -1,4 +1,4 @@
-use bytes::{BufMut, BytesMut};
+use bytes::{Buf, BufMut, BytesMut};
 
 use crate::types::{InfoHash, PeerId};
 
@@ -38,6 +38,7 @@ pub struct Block {
 
 const PSTRLEN: u8 = 19;
 const PSTR: &[u8; 19] = b"BitTorrent protocol";
+const HANDHSAKE_LEN: usize = 68;
 
 impl Message {
     pub fn to_bytes(&self, buf: &mut BytesMut) {
@@ -98,6 +99,29 @@ impl Message {
                 todo!()
             }
         }
+    }
+
+    pub fn from_bytes(src: &mut BytesMut) -> Option<Self> {
+        if src.len() == HANDHSAKE_LEN {
+            let ptrlen = src.get_u8();
+            assert_eq!(PSTRLEN, ptrlen);
+
+            let mut protocol_str = [0u8; 19];
+            src.copy_to_slice(&mut protocol_str);
+            assert_eq!(protocol_str, *PSTR);
+            let _reserved = src.copy_to_bytes(8);
+
+            let mut info_hash = [0u8; 20];
+            src.copy_to_slice(&mut info_hash);
+            let info_hash = InfoHash(info_hash);
+            let mut peer_id_bytes = [0u8; 20];
+            src.copy_to_slice(&mut peer_id_bytes);
+            let peer_id = PeerId(peer_id_bytes);
+
+            return Some(Message::Handshake { peer_id, info_hash });
+        }
+
+        unimplemented!()
     }
 }
 
@@ -239,5 +263,41 @@ mod tests {
 
         // The total buffer should be exactly 9 bytes
         assert_eq!(buf.len(), 9);
+    }
+
+    #[test]
+    fn test_handshake_deserialize() {
+        // Create a valid handshake message in bytes
+        let peer_id = PeerId(*b"-TR2920-abcdefghijkl");
+        let info_hash = InfoHash([
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+        ]);
+
+        // Create a buffer with the handshake message
+        let mut buf = BytesMut::with_capacity(68);
+        buf.put_u8(PSTRLEN); // pstrlen
+        buf.put_slice(PSTR); // protocol string
+        buf.put_bytes(0, 8); // reserved bytes
+        buf.put_slice(&info_hash.0); // info_hash
+        buf.put_slice(&peer_id.0); // peer_id
+
+        // Decode the handshake
+        let message = Message::from_bytes(&mut buf);
+
+        // Check if the message was decoded correctly
+        assert!(message.is_some());
+        if let Some(Message::Handshake {
+            peer_id: decoded_peer_id,
+            info_hash: decoded_info_hash,
+        }) = message
+        {
+            assert_eq!(decoded_peer_id.0, peer_id.0);
+            assert_eq!(decoded_info_hash.0, info_hash.0);
+        } else {
+            panic!("Decoded message is not a handshake!");
+        }
+
+        // The buffer should be empty after decoding
+        assert_eq!(buf.len(), 0);
     }
 }

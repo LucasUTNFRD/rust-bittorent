@@ -5,11 +5,8 @@ use tokio::net::TcpStream;
 pub struct PeerConnection {
     stream: TcpStream,
     peer_addr: SocketAddrV4,
-    peer_id: [u8; 20],      // The peer's peer_id
+    // peer_id: [u8; 20],      // The peer's peer_id
     self_peer_id: [u8; 20], // Our peer_id
-    // torrent: Torrent,
-
-    // piece_manager: Arc<PieceManager>,
 
     // -- State variables --
     ///Local client is choking the remote peer

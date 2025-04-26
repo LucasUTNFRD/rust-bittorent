@@ -2,15 +2,17 @@ use std::{
     collections::HashMap,
     net::SocketAddrV4,
     sync::{Arc, RwLock},
+    time::Duration,
 };
 
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use bittorrent_core::{metainfo::Torrent, types::PeerId};
 use tokio::{
+    net::TcpStream,
     select,
     sync::mpsc::{self, Sender},
-    time::{Instant, interval_at},
+    time::{Instant, interval_at, timeout},
 };
 
 use crate::{
@@ -96,12 +98,30 @@ impl TorrentSession {
 
     /// Spawn PeerConnection Actors to start torrent download
     async fn handle_outboud_peers(&self, peers: Vec<SocketAddrV4>) {
-        for peer in peers {
-            info!("Should connect to Peer{:?}", peer);
-            // spawn a tokio task
-            // connect with the peer
-            // try to perform a handhsake
-            // tokio::spawn()
+        for peer_addr in peers {
+            info!("Should connect to Peer{:?}", peer_addr);
+            tokio::spawn(async move {
+                let stream =
+                    match timeout(Duration::from_secs(10), TcpStream::connect(peer_addr)).await {
+                        Ok(connect_result) => match connect_result {
+                            Ok(s) => {
+                                info!("Connected succesfully to peer:{}", peer_addr);
+                                s
+                            }
+                            Err(e) => {
+                                debug!("[{}] TCP connection failed: {}", peer_addr, e);
+                                return; // Permit released automatically
+                            }
+                        },
+
+                        Err(_) => {
+                            debug!("[{}] TCP connection timed out.", peer_addr);
+                            return;
+                        }
+                    };
+
+                // let peer_connection = PeerConnection::new(stream, info_hash, our_peer_id);
+            });
         }
     }
 }
