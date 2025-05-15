@@ -1,7 +1,11 @@
 [workspace]
-resolver = "2"                                                     # Recommended for new projects
-members = ["bittorent_cli", "bittorent_daemon", "bittorrent_core"]
+resolver = "2"
+members = ["bittorent_daemon", "bittorrent_core"]
 
 [workspace.dependencies]
 anyhow = "1.0"
+sha1 = "0.10"
 thiserror = "2.0"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"

@@ -8,12 +8,14 @@ use crate::{
     types::{InfoHash, PieceHash, PieceHashError},
 };
 
+#[derive(Debug)]
 pub struct Torrent {
     pub announce: String,
     pub info: Info,
     pub info_hash: InfoHash,
 }
 
+#[derive(Debug)]
 pub struct Info {
     /// size of the file in bytes, for single-file torrents
     pub length: i64,
