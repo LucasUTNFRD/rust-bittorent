@@ -1,4 +1,5 @@
 use tokio::sync::mpsc;
+use tracing::info;
 
 pub enum IOMessage {
     ReadBlock,  // info_hash, file_offset, how many bytes read
@@ -37,6 +38,7 @@ impl DiskHandle {
     pub fn new() -> Self {
         let (sender, receiver) = mpsc::channel(1000);
         let actor = DiskActor::new(receiver);
+        info!("Starting Disk Actor");
         tokio::task::spawn_blocking(|| DiskActor::run(actor));
 
         Self { sender }
