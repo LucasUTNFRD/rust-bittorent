@@ -1,11 +1,13 @@
 use anyhow::{Context, Result};
 use bittorrent_core::{torrent_parser::TorrentParser, torrent_session::Client};
 use std::{env, path::Path};
-use tracing::{Level, info};
+use tracing::info;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt().with_max_level(Level::INFO).init();
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .init();
 
     let torrent_path = env::args()
         .nth(1)

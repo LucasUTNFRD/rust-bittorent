@@ -3,7 +3,7 @@ use std::fmt;
 use hex::FromHexError;
 use thiserror::Error;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PeerId(pub [u8; 20]);
 #[derive(Debug)]
 pub struct PieceHash(pub [u8; 20]);
@@ -43,6 +43,20 @@ impl fmt::Display for InfoHash {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Use internal helper or hex crate if feature enabled
         let hex_string = self.to_hex();
+        write!(f, "{}", hex_string)
+    }
+}
+
+impl fmt::Debug for PeerId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let hex_string = hex::encode(self.0);
+        f.debug_tuple("PeerId").field(&hex_string).finish()
+    }
+}
+
+impl fmt::Display for PeerId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let hex_string = hex::encode(self.0);
         write!(f, "{}", hex_string)
     }
 }

@@ -9,8 +9,9 @@ use crate::{
 };
 
 #[derive(Debug)]
-pub struct Torrent {
+pub struct TorrentInfo {
     pub announce: String,
+    pub announce_list: Option<Vec<Vec<String>>>, // TODO: CHECK [BEP_0012](https://www.bittorrent.org/beps/bep_0012.html)
     pub info: Info,
     pub info_hash: InfoHash,
 }
@@ -59,14 +60,21 @@ const PIECE_LENGTH: &[u8] = b"piece length";
 const PIECES: &[u8] = b"pieces";
 
 const ANNOUNCE: &[u8] = b"announce";
+const ANNOUNCE_LIST: &[u8] = b"announce-list";
 const INFO: &[u8] = b"info";
 
-impl Torrent {
-    pub fn from(data: Bencode) -> Result<Torrent, TorrentError> {
+impl TorrentInfo {
+    pub fn from(data: Bencode) -> Result<TorrentInfo, TorrentError> {
         let announce_field = data.get(ANNOUNCE).ok_or(TorrentError::MissingAnnouce)?;
         let announce = match announce_field {
             Bencode::Bytes(bytes) => String::from_utf8(bytes.clone()).unwrap(),
             _ => return Err(TorrentError::MissingAnnouce),
+        };
+
+        let announce_list = if let Some(announce_list) = data.get(ANNOUNCE_LIST) {
+            Some(Self::parse_announce_list(announce_list)?)
+        } else {
+            None
         };
 
         let info_field = data.get(INFO).ok_or(TorrentError::MissingInfo)?;
@@ -77,11 +85,59 @@ impl Torrent {
 
         let info_hash = Self::calculate_info_hash(&info)?;
 
-        Ok(Torrent {
+        Ok(TorrentInfo {
             announce,
             info,
             info_hash,
+            announce_list,
         })
+    }
+
+    pub fn get_url_tiers(&self) -> Vec<String> {
+        let url_vec = if let Some(announce_list) = &self.announce_list {
+            announce_list.iter().flatten().cloned().collect()
+        } else {
+            vec![self.announce.clone()]
+        };
+
+        url_vec
+    }
+
+    fn parse_announce_list(list: &Bencode) -> Result<Vec<Vec<String>>, TorrentError> {
+        match list {
+            Bencode::List(tiers) => {
+                let mut result = Vec::with_capacity(tiers.len());
+
+                // Process each tier
+                for tier in tiers {
+                    match tier {
+                        Bencode::List(trackers) => {
+                            let mut tier_urls = Vec::with_capacity(trackers.len());
+
+                            // Process each tracker URL in the tier
+                            for tracker in trackers {
+                                match tracker {
+                                    Bencode::Bytes(bytes) => {
+                                        // Convert tracker URL from bytes to String
+                                        match String::from_utf8(bytes.clone()) {
+                                            Ok(url) => tier_urls.push(url),
+                                            Err(_) => return Err(TorrentError::DecodingError),
+                                        }
+                                    }
+                                    _ => return Err(TorrentError::DecodingError),
+                                }
+                            }
+
+                            result.push(tier_urls);
+                        }
+                        _ => return Err(TorrentError::DecodingError),
+                    }
+                }
+
+                Ok(result)
+            }
+            _ => Err(TorrentError::DecodingError),
+        }
     }
 
     /// Calculates the InfoHash for a given Info dictionary.
@@ -94,16 +150,12 @@ impl Torrent {
         Ok(InfoHash::from(hash_array)) // Use the From<[u8; 20]> impl
     }
 
-    pub fn get_announce(&self) -> &str {
-        &self.announce
-    }
-
     pub fn get_total_pieces(&self) -> u32 {
         (self.info.length as f64 / self.info.piece_length as f64).ceil() as u32
     }
 }
 
-impl Encode for Torrent {
+impl Encode for TorrentInfo {
     fn to_bencode(&self) -> Bencode {
         let mut dict = BTreeMap::new();
         dict.insert(

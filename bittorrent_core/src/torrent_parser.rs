@@ -7,7 +7,7 @@ use thiserror::Error;
 
 use crate::{
     bencode::{Bencode, BencodeError},
-    metainfo::{Torrent, TorrentError},
+    metainfo::{TorrentError, TorrentInfo},
 };
 
 pub struct TorrentParser;
@@ -19,12 +19,12 @@ pub enum ParseError {
     IOError(#[from] Error),
     #[error("Bencode error: {0}")]
     BencodeError(#[from] BencodeError),
-    #[error("Torrent error: {0}")]
+    #[error("TorrentInfo error: {0}")]
     TorrentError(#[from] TorrentError),
 }
 
 impl TorrentParser {
-    pub fn parse(path: &Path) -> Result<Torrent, ParseError> {
+    pub fn parse(path: &Path) -> Result<TorrentInfo, ParseError> {
         let data = match TorrentParser::read_file(path) {
             Ok(data) => data,
             Err(e) => return Err(ParseError::IOError(e)),
@@ -35,7 +35,7 @@ impl TorrentParser {
             Err(e) => return Err(ParseError::BencodeError(e)),
         };
 
-        let torrent = match Torrent::from(bencoded_data) {
+        let torrent = match TorrentInfo::from(bencoded_data) {
             Ok(torrent) => torrent,
             Err(e) => return Err(ParseError::TorrentError(e)),
         };
