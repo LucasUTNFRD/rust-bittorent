@@ -1,12 +1,18 @@
-use std::{collections::HashMap, net::SocketAddr, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    net::SocketAddr,
+    sync::Arc,
+    time::Duration,
+};
 
 use rand::Rng;
-use tokio::sync::mpsc;
-use tracing::{debug, info};
+use tokio::{net::TcpStream, sync::mpsc};
+use tracing::{debug, info, warn};
 
 use crate::{
     disk_io::DiskHandle,
     metainfo::TorrentInfo,
+    peer::PeerInfo,
     tracker::tracker_client::TrackerClient,
     types::{InfoHash, PeerId},
 };
@@ -29,6 +35,7 @@ struct Torrent {
     our_id: PeerId,
     // piece_manager: PieceManagerActor
     // peer_list
+    peer_list: HashSet<SocketAddr>,
     // tracker
     // status
 }
@@ -69,20 +76,44 @@ impl Torrent {
             disk_handler,
             our_id: client_id,
             cmd_tx,
+            peer_list: HashSet::new(),
         }
     }
     pub async fn run(mut session: Torrent) {
-        info!("Starting tracker client");
+        let torrent = Arc::clone(&session.torrent);
+        let mut tracker = TrackerClient::new(torrent, session.our_id, session.cmd_tx);
         tokio::task::spawn(async move {
-            TrackerClient::new(session.torrent, session.our_id, session.cmd_tx)
-                .start()
-                .await;
+            tracker.start().await;
         });
 
         while let Some(msg) = session.cmd_rx.recv().await {
             match msg {
                 TorrentMessage::PeerList(peers) => {
+                    let info_hash = session.torrent.info_hash;
                     info!("Received {:?} peers from tracker", peers);
+                    for addr in peers {
+                        // let info_hash = torrent.info_hash;
+                        if !session.peer_list.contains(&addr) {
+                            tokio::task::spawn(async move {
+                                match PeerInfo::try_connect_to_peer(
+                                    &addr,
+                                    session.our_id,
+                                    info_hash,
+                                )
+                                .await
+                                {
+                                    Ok(stream) => {
+                                        if let Err(e) = PeerInfo::new(addr).start(stream).await {
+                                            warn!("Peer [{}] Disnconnected with error {}", addr, e);
+                                        }
+                                    }
+                                    Err(e) => {
+                                        warn!("connect to {:?} failed: {:?}", addr, e);
+                                    }
+                                };
+                            });
+                        }
+                    }
                 }
                 TorrentMessage::PeerConnected => {
                     info!("Peer connected");
