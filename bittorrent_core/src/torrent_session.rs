@@ -13,7 +13,7 @@ use crate::{
     disk_io::DiskHandle,
     metainfo::TorrentInfo,
     peer::PeerInfo,
-    piece_picker::Block,
+    piece_picker::{Block, PiecePicker},
     tracker::tracker_client::TrackerClient,
     types::{InfoHash, PeerId},
 };
@@ -35,7 +35,7 @@ struct Torrent {
 
     disk_handler: Arc<DiskHandle>,
     our_id: PeerId,
-    // piece_manager: PieceManagerActor
+    piece_manager: PiecePicker,
     // peer_list
     peer_list: HashSet<SocketAddr>,
     // tracker
@@ -52,6 +52,8 @@ pub enum TorrentMessage {
     PeerList(Vec<SocketAddr>),
     PeerConnected(SocketAddr),
     PeerDisconnected(SocketAddr),
+    PeerBitfield(SocketAddr, Bitfield),
+    // FillDownloadQueue(SocketAddr)
 }
 
 impl TorrentHandle {
@@ -74,6 +76,7 @@ impl Torrent {
     ) -> Self {
         // We should start the piece picker
         let num_pieces = torrent.get_total_pieces() - 1;
+        let piece_manager = PiecePicker::from(torrent.clone());
         Self {
             torrent,
             cmd_rx: receiver,
@@ -82,11 +85,11 @@ impl Torrent {
             cmd_tx,
             peer_list: HashSet::new(),
             bitfield: Bitfield::new(num_pieces),
+            piece_manager,
         }
     }
     pub async fn run(mut session: Torrent) {
         let our_id = session.our_id;
-        let info_hash = session.torrent.info_hash;
         let cmd_tx = session.cmd_tx.clone();
 
         //spawn tracker task
@@ -104,7 +107,7 @@ impl Torrent {
                     info!("Received {:?} peers from tracker", peers);
                     for addr in peers {
                         if !session.peer_list.contains(&addr) {
-                            session.connect_to_peer(addr, info_hash)
+                            session.connect_to_peer(addr)
                         }
                     }
                 }
@@ -120,18 +123,22 @@ impl Torrent {
                     //session.piece_picker.decrement(addr);
                     session.peer_list.remove(&addr);
                 }
+                TorrentMessage::PeerBitfield(addr, bitfield) => {
+                    todo!()
+                }
             }
         }
     }
 
-    fn connect_to_peer(&self, addr: SocketAddr, info_hash: InfoHash) {
+    fn connect_to_peer(&self, addr: SocketAddr) {
         let tx = self.cmd_tx.clone();
         let our_id = self.our_id;
+        let info_hash = self.torrent.info_hash;
         tokio::task::spawn(async move {
             match PeerInfo::try_connect_to_peer(&addr, our_id, info_hash).await {
                 Ok(stream) => {
                     let _ = tx.send(TorrentMessage::PeerConnected(addr)).await;
-                    if let Err(e) = PeerInfo::new(addr).start(stream).await {
+                    if let Err(e) = PeerInfo::new(addr, tx.clone()).start(stream).await {
                         let _ = tx.send(TorrentMessage::PeerDisconnected(addr)).await;
                         warn!("Peer [{}] Disconnected with error {}", addr, e);
                     }

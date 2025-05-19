@@ -35,7 +35,7 @@ impl TorrentParser {
             Err(e) => return Err(ParseError::BencodeError(e)),
         };
 
-        let torrent = match TorrentInfo::from(bencoded_data) {
+        let torrent = match TorrentInfo::try_from(bencoded_data) {
             Ok(torrent) => torrent,
             Err(e) => return Err(ParseError::TorrentError(e)),
         };
