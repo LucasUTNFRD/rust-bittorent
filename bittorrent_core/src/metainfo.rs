@@ -63,8 +63,9 @@ const ANNOUNCE: &[u8] = b"announce";
 const ANNOUNCE_LIST: &[u8] = b"announce-list";
 const INFO: &[u8] = b"info";
 
-impl TorrentInfo {
-    pub fn from(data: Bencode) -> Result<TorrentInfo, TorrentError> {
+impl TryFrom<Bencode> for TorrentInfo {
+    type Error = TorrentError;
+    fn try_from(data: Bencode) -> Result<Self, Self::Error> {
         let announce_field = data.get(ANNOUNCE).ok_or(TorrentError::MissingAnnouce)?;
         let announce = match announce_field {
             Bencode::Bytes(bytes) => String::from_utf8(bytes.clone()).unwrap(),
@@ -92,7 +93,9 @@ impl TorrentInfo {
             announce_list,
         })
     }
+}
 
+impl TorrentInfo {
     pub fn get_url_tiers(&self) -> Vec<String> {
         let url_vec = if let Some(announce_list) = &self.announce_list {
             announce_list.iter().flatten().cloned().collect()
@@ -101,6 +104,20 @@ impl TorrentInfo {
         };
 
         url_vec
+    }
+
+    // BUG: this fn lacks from idx validation
+    pub fn get_piece_len(&self, piece_idx: usize) -> u32 {
+        if piece_idx == self.get_total_pieces() - 1 {
+            let last_len = self.info.length as u32 % self.info.piece_length as u32;
+            if last_len == 0 {
+                self.info.piece_length as u32
+            } else {
+                last_len
+            }
+        } else {
+            self.info.piece_length as u32
+        }
     }
 
     fn parse_announce_list(list: &Bencode) -> Result<Vec<Vec<String>>, TorrentError> {
@@ -150,8 +167,8 @@ impl TorrentInfo {
         Ok(InfoHash::from(hash_array)) // Use the From<[u8; 20]> impl
     }
 
-    pub fn get_total_pieces(&self) -> u32 {
-        (self.info.length as f64 / self.info.piece_length as f64).ceil() as u32
+    pub fn get_total_pieces(&self) -> usize {
+        (self.info.length as f64 / self.info.piece_length as f64).ceil() as usize
     }
 }
 

@@ -1,4 +1,5 @@
 mod bencode;
+mod bitfield;
 mod disk_io;
 mod metainfo;
 mod peer;

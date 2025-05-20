@@ -4,7 +4,10 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use tokio_util::codec::{Decoder, Encoder};
 use tracing::info;
 
-use crate::types::{InfoHash, PeerId};
+use crate::{
+    piece_picker::{Block, BlockInfo},
+    types::{InfoHash, PeerId},
+};
 
 #[derive(Debug)]
 pub enum Message {
@@ -91,20 +94,6 @@ impl From<u8> for MessageId {
             _ => unreachable!(),
         }
     }
-}
-
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
-pub struct BlockInfo {
-    pub index: u32,
-    pub begin: u32,
-    pub length: u32,
-}
-
-#[derive(Debug)]
-pub struct Block {
-    pub index: u32,
-    pub begin: u32,
-    pub block: Vec<u8>,
 }
 
 #[derive(Debug, Clone)]

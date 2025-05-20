@@ -1,26 +1,29 @@
-use std::{collections::HashSet, net::SocketAddr, time::Duration};
+use std::{
+    collections::HashSet,
+    net::SocketAddr,
+    sync::{Arc, RwLock},
+    time::Duration,
+};
 
 use futures::{SinkExt, StreamExt};
-use message::{Block, Handshake, MessageDecoder};
+use message::{Handshake, Message, MessageDecoder};
 use thiserror::Error;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
+    sync::mpsc,
 };
 use tokio_util::codec::Framed;
-use tracing::info;
+use tracing::{debug, info};
 
-use crate::types::{InfoHash, PeerId};
+use crate::{
+    bitfield::Bitfield,
+    piece_picker::Block,
+    torrent_session::TorrentMessage,
+    types::{InfoHash, PeerId},
+};
 
 mod message;
-
-// ---- BITFIELD -----
-struct Bitfield {
-    bitfield: Vec<u8>,
-    nbits: usize,
-}
-
-impl Bitfield {}
 
 // ---- Peer info -----
 // holds information and statistics about one peer that we are connected
@@ -37,6 +40,8 @@ pub struct PeerInfo {
     outgoing_requests: HashSet<Block>,
     ingoing_requests: HashSet<Block>,
     //
+    session_manager: mpsc::Sender<TorrentMessage>,
+    our_bitfield: Arc<RwLock<Bitfield>>,
 }
 
 // ---- UTIL ----
@@ -52,17 +57,14 @@ impl ConnectTimeout for TcpStream {
 
 // ----- Connection logic -----
 
-// handhsake -> tcpstream if ok
-// new peer (tcpstream) -> peer.run.await
-
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Error)]
 pub enum PeerConnectError {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
-    #[error("connection timed out")]
-    Timeout,
+    // #[error("connection timed out")]
+    // Timeout,
     #[error("invalid handshake format")]
     InvalidHandshake,
     #[error("handshake fields mismatch")]
@@ -94,7 +96,11 @@ impl PeerInfo {
         Ok(stream)
     }
 
-    pub fn new(peer_addr: SocketAddr) -> Self {
+    pub fn new(
+        peer_addr: SocketAddr,
+        session_manager: mpsc::Sender<TorrentMessage>,
+        our_bitfield: Arc<RwLock<Bitfield>>,
+    ) -> Self {
         Self {
             peer_addr,
             am_interested: false,
@@ -103,6 +109,8 @@ impl PeerInfo {
             remote_choking: false,
             outgoing_requests: HashSet::new(),
             ingoing_requests: HashSet::new(),
+            session_manager,
+            our_bitfield,
         }
     }
 
@@ -110,10 +118,116 @@ impl PeerInfo {
         let decoder = MessageDecoder {};
         let mut framed_stream = Framed::new(&mut stream, decoder);
 
-        while let Some(Ok(msg)) = framed_stream.next().await {
-            info!("Peer [{}] message {:?}", self.peer_addr, msg);
+        {
+            // The bitfield message may only be sent immediately after the handshaking sequence is completed, and before any other messages are sent.
+            // It is optional, and need not be sent if a client has no pieces.
+            // let bitfield = self.our_bitfield.read().unwrap().clone();
+
+            info!("Sending our bitfield to peer [{}]", self.peer_addr);
+            // framed_stream.send(Message::Bitfield(bitfield)).await?;
+        };
+
+        loop {
+            tokio::select! {
+                Some(msg) = framed_stream.next() => {
+                    let msg = msg?;
+                    info!("Peer [{}] message {:?}", self.peer_addr, msg);
+                    // every we receive a message we should reset last_read_interval
+                    self.handle_msg(&mut framed_stream,msg).await?;
+                }
+            }
+        }
+    }
+
+    async fn handle_msg(
+        &mut self,
+        framed_stream: &mut Framed<&mut TcpStream, MessageDecoder>,
+        msg: Message,
+    ) -> Result<(), PeerConnectError> {
+        use Message::*;
+        match msg {
+            KeepAlive => {
+                debug!("[{}] sent Keep Alive", self.peer_addr);
+            }
+            Bitfield(data) => {
+                // TODO:
+                // Improve bitfield struct
+                // try from data where
+                // fails if InvalidLength or SparseBitSet
+                //
+                // Drop peer if:
+                //     Bitfield is not sent as the first message after handshake.
+                //     Length is incorrect.
+                //     Spare bits are non-zero.
+                // Continue session if:
+                //     Bitfield is correct.
+                //     Bitfield is missing (assume peer has no pieces).
+                //     Bitfield under-reports possession (lazy mode).
+
+                info!("We shuld check if we are interested");
+            }
+            Choke => {
+                self.remote_choking = true;
+                if self.am_interested {
+                    self.try_request(framed_stream);
+                }
+            }
+            Unchoke => {
+                self.remote_choking = false;
+                self.cancel_pending_requests(framed_stream);
+            }
+            Interested => {
+                self.remote_interested = true;
+                //this info is useful for choking logic
+                todo!()
+            }
+            NotInterested => {
+                self.remote_interested = false;
+                //this info is useful for choking logic
+                todo!()
+            }
+            Have { piece_index } => {
+                // increment piece avalability
+                todo!()
+            }
+            Request(block_info) => {
+                // we manage at most 5 request x peer
+                // if can send  then
+                // let block = self.read_block(block_info);
+                // framed_stream.send(Piece(block)).await?;
+                // else
+                //
+            }
+            Piece(block) => {
+                // check if we requested this block
+                // if yes then
+                // unmark as a requested
+                // and sha1 validation
+                // and write piece
+                // else ignore or track this peer is sending wrong pieces
+            }
+            Cancel(block_info) => {
+                // if that block was previously requested by peer unmark it from peer_requests
+                // abort reading?
+            }
         }
 
-        todo!()
+        Ok(())
+    }
+
+    fn try_request(&mut self, framed_stream: &mut Framed<&mut TcpStream, MessageDecoder>) {
+        todo!("we should try send request for a piece to remote peer")
+    }
+
+    fn cancel_pending_requests(
+        &mut self,
+        framed_stream: &mut Framed<&mut TcpStream, MessageDecoder>,
+    ) {
+        todo!("we should send cancel request for pending request we did to remote peer")
     }
 }
+
+// question to resolve
+// how does PeerInfo become aware of a piece acquistion?
+// what we do with bitfield?
+// how we select a piece to request?
