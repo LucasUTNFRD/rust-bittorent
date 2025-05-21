@@ -1,11 +1,15 @@
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
-use crate::{bitfield::Bitfield, metainfo::TorrentInfo};
+use bytes::Bytes;
 
+use crate::{bitfield::BitField, metainfo::TorrentInfo};
+
+/// This data structure has view of what peer has
 pub struct PiecePicker {
-    peer_bitifield: HashMap<SocketAddr, Bitfield>,
+    peer_bitifield: HashMap<SocketAddr, BitField>,
     total_pieces: usize,
     pieces: Vec<PieceIndex>,
+    pick_strategy: Strategy,
 }
 
 struct PieceIndex {
@@ -22,6 +26,11 @@ enum PieceStatus {
     Download,
 }
 
+enum Strategy {
+    RandomFirst,
+    RarestFirst,
+}
+
 impl From<Arc<TorrentInfo>> for PiecePicker {
     fn from(torrent: Arc<TorrentInfo>) -> Self {
         let total_pieces = torrent.get_total_pieces();
@@ -36,6 +45,7 @@ impl From<Arc<TorrentInfo>> for PiecePicker {
             peer_bitifield: HashMap::new(),
             total_pieces,
             pieces,
+            pick_strategy: Strategy::RandomFirst,
         }
     }
 }
@@ -44,7 +54,7 @@ impl PiecePicker {
     const BLOCK_SIZE: u32 = 1 << 14;
 
     /// register peer’s bitfield (which pieces it has)
-    pub fn register_peer(&mut self, peer: SocketAddr, bitfield: Bitfield) {
+    pub fn register_peer(&mut self, peer: SocketAddr, bitfield: BitField) {
         for (i, piece) in self.pieces.iter_mut().enumerate() {
             if bitfield.has_piece(i) {
                 piece.availability += 1;
@@ -84,8 +94,14 @@ impl PiecePicker {
         })
     }
 
-    pub fn get_download_queue(&self) {
-        todo!()
+    fn downloaded_pieces_count(&self) -> usize {
+        self.pieces
+            .iter()
+            .filter(|piece| piece.status == PieceStatus::Download)
+            .count()
+    }
+
+    pub fn pick_piece(&self, peer: &SocketAddr) {
         // TODO:
         // we need to return a vec of block info to be sent to peer as request of pieces
         // here is were piece selection algorithm takes place
@@ -104,9 +120,9 @@ pub struct BlockInfo {
     pub length: u32,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct Block {
     pub index: u32,
     pub begin: u32,
-    pub block: Vec<u8>,
+    pub data: Bytes,
 }
