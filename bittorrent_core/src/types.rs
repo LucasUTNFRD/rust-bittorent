@@ -25,7 +25,7 @@ pub enum PeerIdError {
     #[error("Invalid Lenght")]
     InvalidLenght,
 }
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PieceHash(pub [u8; 20]);
 
 #[derive(Debug, Error, Eq, PartialEq)]
