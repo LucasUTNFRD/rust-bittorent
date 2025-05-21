@@ -17,7 +17,7 @@ pub enum Message {
     Interested,
     NotInterested,
     Have { piece_index: u32 },
-    Bitfield(Vec<u8>),
+    Bitfield(Bytes),
     Request(BlockInfo),
     Piece(Block),
     Cancel(BlockInfo),
@@ -133,9 +133,9 @@ impl Decoder for MessageDecoder {
                 Message::Have { piece_index: index }
             }
             MessageId::Bitfield => {
-                let mut bitvec = vec![0; msg_length as usize - 1];
-                src.copy_to_slice(&mut bitvec);
-                Message::Bitfield(bitvec)
+                let len = msg_length as usize - 1;
+                let bitfield_bytes = src.split_to(len).freeze();
+                Message::Bitfield(bitfield_bytes)
             }
             // <len=0013><id=6><index><begin><length>
             MessageId::Request => {
@@ -154,14 +154,11 @@ impl Decoder for MessageDecoder {
                 let index = src.get_u32();
                 let begin = src.get_u32();
 
-                let mut block = vec![0; msg_length as usize - 9];
-                src.copy_to_slice(&mut block);
+                let data = src.split_to(msg_length as usize - 9).freeze();
+                // let mut block = vec![0; msg_length as usize - 9];
+                // src.copy_to_slice(&mut block);
 
-                Message::Piece(Block {
-                    index,
-                    begin,
-                    block,
-                })
+                Message::Piece(Block { index, begin, data })
             }
             // <len=0013><id=8><index><begin><length>
             MessageId::Cancel => {
@@ -233,12 +230,12 @@ impl Encoder<Message> for MessageDecoder {
                 Ok(())
             }
             Message::Piece(block) => {
-                let length = block.block.len() + 9;
+                let length = block.data.len() + 9;
                 dst.put_u32(length as u32);
                 dst.put_u8(MessageId::Piece as u8);
                 dst.put_u32(block.index);
                 dst.put_u32(block.begin);
-                dst.put_slice(&block.block);
+                dst.put_slice(&block.data);
                 Ok(())
             }
             Message::Cancel(block) => {

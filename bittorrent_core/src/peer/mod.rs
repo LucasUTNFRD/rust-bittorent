@@ -1,9 +1,4 @@
-use std::{
-    collections::HashSet,
-    net::SocketAddr,
-    sync::{Arc, RwLock},
-    time::Duration,
-};
+use std::{collections::HashSet, net::SocketAddr, sync::Arc, time::Duration};
 
 use futures::{SinkExt, StreamExt};
 use message::{Handshake, Message, MessageDecoder};
@@ -11,14 +6,15 @@ use thiserror::Error;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
-    sync::mpsc,
+    sync::{mpsc, oneshot},
 };
 use tokio_util::codec::Framed;
 use tracing::{debug, info};
 
 use crate::{
-    bitfield::Bitfield,
-    piece_picker::Block,
+    bitfield::{BitField, BitfieldError},
+    metainfo::TorrentInfo,
+    piece_picker::BlockInfo,
     torrent_session::TorrentMessage,
     types::{InfoHash, PeerId},
 };
@@ -29,7 +25,6 @@ mod message;
 // holds information and statistics about one peer that we are connected
 
 pub struct PeerInfo {
-    // pieces: Option<Bitfield>,
     //state related
     peer_addr: SocketAddr,
     am_interested: bool,
@@ -37,11 +32,12 @@ pub struct PeerInfo {
     remote_interested: bool,
     remote_choking: bool,
     // request tracking
-    outgoing_requests: HashSet<Block>,
-    ingoing_requests: HashSet<Block>,
+    outgoing_requests: HashSet<BlockInfo>,
+    ingoing_requests: HashSet<BlockInfo>,
     //
     session_manager: mpsc::Sender<TorrentMessage>,
-    our_bitfield: Arc<RwLock<Bitfield>>,
+    // TorrentInfo for valid
+    torrent: Arc<TorrentInfo>,
 }
 
 // ---- UTIL ----
@@ -69,6 +65,8 @@ pub enum PeerConnectError {
     InvalidHandshake,
     #[error("handshake fields mismatch")]
     HandshakeMismatch,
+    #[error("Invalid Bitfield {0}")]
+    InvalidBitfield(BitfieldError),
 }
 impl PeerInfo {
     pub async fn try_connect_to_peer(
@@ -99,7 +97,7 @@ impl PeerInfo {
     pub fn new(
         peer_addr: SocketAddr,
         session_manager: mpsc::Sender<TorrentMessage>,
-        our_bitfield: Arc<RwLock<Bitfield>>,
+        torrent: Arc<TorrentInfo>,
     ) -> Self {
         Self {
             peer_addr,
@@ -110,7 +108,7 @@ impl PeerInfo {
             outgoing_requests: HashSet::new(),
             ingoing_requests: HashSet::new(),
             session_manager,
-            our_bitfield,
+            torrent,
         }
     }
 
@@ -131,10 +129,11 @@ impl PeerInfo {
             tokio::select! {
                 Some(msg) = framed_stream.next() => {
                     let msg = msg?;
-                    info!("Peer [{}] message {:?}", self.peer_addr, msg);
                     // every we receive a message we should reset last_read_interval
                     self.handle_msg(&mut framed_stream,msg).await?;
                 }
+                // recv a task that we requested
+                // broadcast of piece obtained
             }
         }
     }
@@ -150,11 +149,6 @@ impl PeerInfo {
                 debug!("[{}] sent Keep Alive", self.peer_addr);
             }
             Bitfield(data) => {
-                // TODO:
-                // Improve bitfield struct
-                // try from data where
-                // fails if InvalidLength or SparseBitSet
-                //
                 // Drop peer if:
                 //     Bitfield is not sent as the first message after handshake.
                 //     Length is incorrect.
@@ -163,14 +157,31 @@ impl PeerInfo {
                 //     Bitfield is correct.
                 //     Bitfield is missing (assume peer has no pieces).
                 //     Bitfield under-reports possession (lazy mode).
-
-                info!("We shuld check if we are interested");
+                let num_pieces = self.torrent.get_total_pieces();
+                match BitField::try_from(data, num_pieces) {
+                    Ok(bitfield) => {
+                        let (ask_interest, resp) = oneshot::channel();
+                        let _ = self
+                            .session_manager
+                            .send(TorrentMessage::PeerBitfield {
+                                peer_addr: self.peer_addr,
+                                peer_bf: bitfield,
+                                interest: ask_interest,
+                            })
+                            .await;
+                        if let Ok(am_interested) = resp.await {
+                            if am_interested {
+                                let _ = framed_stream.send(Message::Interested).await;
+                                self.am_interested = true;
+                                self.try_request(framed_stream);
+                            } /* intially we are not interested*/
+                        }
+                    }
+                    Err(e) => return Err(PeerConnectError::InvalidBitfield(e)),
+                };
             }
             Choke => {
                 self.remote_choking = true;
-                if self.am_interested {
-                    self.try_request(framed_stream);
-                }
             }
             Unchoke => {
                 self.remote_choking = false;
@@ -216,7 +227,23 @@ impl PeerInfo {
     }
 
     fn try_request(&mut self, framed_stream: &mut Framed<&mut TcpStream, MessageDecoder>) {
-        todo!("we should try send request for a piece to remote peer")
+        if !self.remote_choking && self.am_interested {
+            // let tasks: Vec<Option<BlockInfo>>;
+            // while let Some(block_to_request) = tasks.pop() {
+            //     // mando
+            //     framed_stream.send(Message::Request(block_to_request));
+            //     // marco
+            //     self.outgoing_requests.insert(block_to_request);
+            //     // me fijo si quedan tareas
+            //     if !remainding_tasks() {
+            //         get_more_tasks(self.peer_addr);
+            //     }
+            //     // me fijo si nos da el threshold para mandar pipeline de requesdt
+            //     if self.outgoing_requests.len() >= THRESHOLD {
+            //         break;
+            //     }
+            // }
+        }
     }
 
     fn cancel_pending_requests(
