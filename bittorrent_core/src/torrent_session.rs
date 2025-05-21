@@ -1,18 +1,20 @@
 use std::{
     collections::{HashMap, HashSet},
     net::SocketAddr,
-    sync::{Arc, RwLock},
+    sync::Arc,
 };
 
+use bytes::Bytes;
 use rand::Rng;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tracing::{info, warn};
 
 use crate::{
-    bitfield::Bitfield,
-    disk_io::DiskHandle,
+    bitfield::BitField,
+    disk_io::{DiskHandle, IOMessage},
     metainfo::TorrentInfo,
     peer::PeerInfo,
+    piece_cache::PieceCache,
     piece_picker::{Block, PiecePicker},
     tracker::tracker_client::TrackerClient,
     types::{InfoHash, PeerId},
@@ -36,12 +38,9 @@ struct Torrent {
     disk_handler: Arc<DiskHandle>,
     our_id: PeerId,
     piece_manager: PiecePicker,
-    // peer_list
     peer_list: HashSet<SocketAddr>,
-    // tracker
-    // status
-    // bitfield: Bitfield,
-    bitfield: Arc<RwLock<Bitfield>>,
+    bitfield: BitField,
+    piece_cache: PieceCache,
 }
 
 #[derive(Clone)]
@@ -53,8 +52,12 @@ pub enum TorrentMessage {
     PeerList(Vec<SocketAddr>),
     PeerConnected(SocketAddr),
     PeerDisconnected(SocketAddr),
-    PeerBitfield(SocketAddr, Bitfield),
-    // FillDownloadQueue(SocketAddr)
+    PeerBitfield {
+        peer_addr: SocketAddr,
+        peer_bf: BitField,
+        interest: oneshot::Sender<bool>,
+    },
+    Piece(SocketAddr, Block),
 }
 
 impl TorrentHandle {
@@ -78,6 +81,7 @@ impl Torrent {
         // We should start the piece picker
         let num_pieces = torrent.get_total_pieces();
         let piece_manager = PiecePicker::from(torrent.clone());
+        let piece_cache = PieceCache::from(torrent.clone());
         Self {
             torrent,
             cmd_rx: receiver,
@@ -85,8 +89,9 @@ impl Torrent {
             our_id: client_id,
             cmd_tx,
             peer_list: HashSet::new(),
-            bitfield: Arc::new(RwLock::new(Bitfield::new(num_pieces))),
+            bitfield: BitField::new(num_pieces),
             piece_manager,
+            piece_cache,
         }
     }
     pub async fn run(mut session: Torrent) {
@@ -124,26 +129,42 @@ impl Torrent {
                     //session.piece_picker.decrement(addr);
                     session.peer_list.remove(&addr);
                 }
-                TorrentMessage::PeerBitfield(addr, bitfield) => {
-                    session.piece_manager.register_peer(addr, bitfield);
+                TorrentMessage::PeerBitfield {
+                    peer_addr,
+                    peer_bf,
+                    interest,
+                } => {
+                    session.piece_manager.register_peer(peer_addr, peer_bf);
+                    let am_interested = session.piece_manager.check_interest(peer_addr);
+                    let _ = interest.send(am_interested);
+                }
+                TorrentMessage::Piece(peer_addr, block) => {
+                    if let Some(piece_completed) = session.piece_cache.insert_block(block) {
+                        session.try_write_piece(piece_completed, peer_addr);
+                    }
                 }
             }
         }
+    }
+
+    fn try_write_piece(&self, piece: (usize, Bytes), peer: SocketAddr) {
+        // validate it
+        // if not valid
+        // rank peer as possible malicious
+        // if valid then
+        // write piece to disk
     }
 
     fn connect_to_peer(&self, addr: SocketAddr) {
         let tx = self.cmd_tx.clone();
         let our_id = self.our_id;
         let info_hash = self.torrent.info_hash;
-        let out_bitfield = self.bitfield.clone();
+        let torrent = self.torrent.clone();
         tokio::task::spawn(async move {
             match PeerInfo::try_connect_to_peer(&addr, our_id, info_hash).await {
                 Ok(stream) => {
                     let _ = tx.send(TorrentMessage::PeerConnected(addr)).await;
-                    if let Err(e) = PeerInfo::new(addr, tx.clone(), out_bitfield)
-                        .start(stream)
-                        .await
-                    {
+                    if let Err(e) = PeerInfo::new(addr, tx.clone(), torrent).start(stream).await {
                         let _ = tx.send(TorrentMessage::PeerDisconnected(addr)).await;
                         warn!("Peer [{}] Disconnected with error {}", addr, e);
                     }
