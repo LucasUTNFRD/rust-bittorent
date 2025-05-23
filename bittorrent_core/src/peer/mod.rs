@@ -6,10 +6,10 @@ use thiserror::Error;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
-    sync::{mpsc, oneshot},
+    sync::{broadcast, mpsc, oneshot},
 };
 use tokio_util::codec::Framed;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::{
     bitfield::{BitField, BitfieldError},
@@ -38,6 +38,8 @@ pub struct PeerInfo {
     session_manager: mpsc::Sender<TorrentMessage>,
     // TorrentInfo for valid
     torrent: Arc<TorrentInfo>,
+    blocks_to_request: Option<Vec<BlockInfo>>,
+    // piece_notification: broadcast::Receiver<u32>,
 }
 
 // ---- UTIL ----
@@ -67,6 +69,10 @@ pub enum PeerConnectError {
     HandshakeMismatch,
     #[error("Invalid Bitfield {0}")]
     InvalidBitfield(BitfieldError),
+    #[error("Failed to send task request to session manager")]
+    TaskRequestFailed,
+    #[error("Session manager disconnected")]
+    SessionDisconnected,
 }
 impl PeerInfo {
     pub async fn try_connect_to_peer(
@@ -98,6 +104,7 @@ impl PeerInfo {
         peer_addr: SocketAddr,
         session_manager: mpsc::Sender<TorrentMessage>,
         torrent: Arc<TorrentInfo>,
+        // piece_update: broadcast::Receiver<u32>, // if we receive some broadcast notify peer a piece we have
     ) -> Self {
         Self {
             peer_addr,
@@ -109,31 +116,40 @@ impl PeerInfo {
             ingoing_requests: HashSet::new(),
             session_manager,
             torrent,
+            blocks_to_request: None,
         }
     }
 
-    pub async fn start(&mut self, mut stream: TcpStream) -> Result<(), PeerConnectError> {
+    pub async fn start(
+        &mut self,
+        mut stream: TcpStream,
+        our_bitield: Option<BitField>,
+    ) -> Result<(), PeerConnectError> {
         let decoder = MessageDecoder {};
         let mut framed_stream = Framed::new(&mut stream, decoder);
 
-        {
-            // The bitfield message may only be sent immediately after the handshaking sequence is completed, and before any other messages are sent.
-            // It is optional, and need not be sent if a client has no pieces.
-            // let bitfield = self.our_bitfield.read().unwrap().clone();
-
+        if let Some(bitfield) = our_bitield {
             info!("Sending our bitfield to peer [{}]", self.peer_addr);
-            // framed_stream.send(Message::Bitfield(bitfield)).await?;
-        };
+            framed_stream
+                .send(Message::Bitfield(bitfield.as_bytes()))
+                .await
+                .map_err(PeerConnectError::Io)?;
+        }
 
         loop {
             tokio::select! {
-                Some(msg) = framed_stream.next() => {
+                Some(msg) = framed_stream.next() =>{
                     let msg = msg?;
                     // every we receive a message we should reset last_read_interval
-                    self.handle_msg(&mut framed_stream,msg).await?;
+                    self.handle_msg(&mut framed_stream, msg).await?;
                 }
-                // recv a task that we requested
-                // broadcast of piece obtained
+                // cmd = cmd_tx.recv() =>{
+                    // match cmd{
+                    //  Task
+                    //
+                    // }
+
+                // }
             }
         }
     }
@@ -149,14 +165,7 @@ impl PeerInfo {
                 debug!("[{}] sent Keep Alive", self.peer_addr);
             }
             Bitfield(data) => {
-                // Drop peer if:
-                //     Bitfield is not sent as the first message after handshake.
-                //     Length is incorrect.
-                //     Spare bits are non-zero.
-                // Continue session if:
-                //     Bitfield is correct.
-                //     Bitfield is missing (assume peer has no pieces).
-                //     Bitfield under-reports possession (lazy mode).
+                debug!("[{}] sent bitfield", self.peer_addr);
                 let num_pieces = self.torrent.get_total_pieces();
                 match BitField::try_from(data, num_pieces) {
                     Ok(bitfield) => {
@@ -171,9 +180,10 @@ impl PeerInfo {
                             .await;
                         if let Ok(am_interested) = resp.await {
                             if am_interested {
+                                debug!("We are interested to {}", self.peer_addr);
                                 let _ = framed_stream.send(Message::Interested).await;
                                 self.am_interested = true;
-                                self.try_request(framed_stream);
+                                self.try_request(framed_stream).await?;
                             } /* intially we are not interested*/
                         }
                     }
@@ -181,27 +191,60 @@ impl PeerInfo {
                 };
             }
             Choke => {
+                debug!("[{}] choked us", self.peer_addr);
                 self.remote_choking = true;
+                // This blocks are dropped
+                // TODO: We want block grained piece selection
+                // we should track this
+                // self.outgoing_requests.clear();
             }
             Unchoke => {
                 self.remote_choking = false;
-                self.cancel_pending_requests(framed_stream);
+                debug!("Peer {} is willing to send data ", self.peer_addr);
+                self.try_request(framed_stream).await?;
             }
             Interested => {
                 self.remote_interested = true;
-                //this info is useful for choking logic
-                todo!()
+                todo!("We did not send our bitfield")
             }
             NotInterested => {
                 self.remote_interested = false;
-                //this info is useful for choking logic
-                todo!()
+                todo!("We did not send our bitfield")
             }
             Have { piece_index } => {
                 // increment piece avalability
-                todo!()
+
+                if self.am_interested {
+                    self.session_manager
+                        .send(TorrentMessage::PeerHave(self.peer_addr, piece_index, None))
+                        .await
+                        .map_err(|_| PeerConnectError::SessionDisconnected)?;
+                } else {
+                    debug!("Peer now has:{} re-check interest", piece_index);
+                    let (ask_interest, resp) = oneshot::channel();
+                    self.session_manager
+                        .send(TorrentMessage::PeerHave(
+                            self.peer_addr,
+                            piece_index,
+                            Some(ask_interest),
+                        ))
+                        .await
+                        .map_err(|_| PeerConnectError::SessionDisconnected)?;
+                    if let Ok(am_interested) = resp.await {
+                        if am_interested {
+                            debug!("We are interested to {}", self.peer_addr);
+                            let _ = framed_stream.send(Message::Interested).await;
+                            self.am_interested = true;
+                            self.try_request(framed_stream).await?;
+                        } else {
+                            debug!("We are not  interested to {}", self.peer_addr);
+                        }
+                    }
+                }
+
+                // if we are not interested re-check interest
             }
-            Request(block_info) => {
+            Request(_block_info) => {
                 // we manage at most 5 request x peer
                 // if can send  then
                 // let block = self.read_block(block_info);
@@ -210,14 +253,24 @@ impl PeerInfo {
                 //
             }
             Piece(block) => {
-                // check if we requested this block
-                // if yes then
-                // unmark as a requested
-                // and sha1 validation
-                // and write piece
-                // else ignore or track this peer is sending wrong pieces
+                let info = BlockInfo {
+                    index: block.index,
+                    begin: block.begin,
+                    length: block.data.len() as u32,
+                };
+
+                if !self.outgoing_requests.contains(&info) {
+                    warn!("Received an unrequested piece");
+                    return Ok(());
+                }
+                self.outgoing_requests.remove(&info);
+                self.session_manager
+                    .send(TorrentMessage::Piece(self.peer_addr, block))
+                    .await
+                    .map_err(|_| PeerConnectError::SessionDisconnected)?;
+                self.try_request(framed_stream).await?;
             }
-            Cancel(block_info) => {
+            Cancel(_block_info) => {
                 // if that block was previously requested by peer unmark it from peer_requests
                 // abort reading?
             }
@@ -226,35 +279,54 @@ impl PeerInfo {
         Ok(())
     }
 
-    fn try_request(&mut self, framed_stream: &mut Framed<&mut TcpStream, MessageDecoder>) {
-        if !self.remote_choking && self.am_interested {
-            // let tasks: Vec<Option<BlockInfo>>;
-            // while let Some(block_to_request) = tasks.pop() {
-            //     // mando
-            //     framed_stream.send(Message::Request(block_to_request));
-            //     // marco
-            //     self.outgoing_requests.insert(block_to_request);
-            //     // me fijo si quedan tareas
-            //     if !remainding_tasks() {
-            //         get_more_tasks(self.peer_addr);
-            //     }
-            //     // me fijo si nos da el threshold para mandar pipeline de requesdt
-            //     if self.outgoing_requests.len() >= THRESHOLD {
-            //         break;
-            //     }
-            // }
-        }
-    }
-
-    fn cancel_pending_requests(
+    const THRESHOLD: usize = 5;
+    async fn try_request(
         &mut self,
         framed_stream: &mut Framed<&mut TcpStream, MessageDecoder>,
-    ) {
-        todo!("we should send cancel request for pending request we did to remote peer")
+    ) -> Result<(), PeerConnectError> {
+        if !self.remote_choking && self.am_interested {
+            if self.outgoing_requests.len() >= Self::THRESHOLD {
+                return Ok(());
+            }
+            debug!("Trying to request data");
+            if self.blocks_to_request.is_none() {
+                self.get_tasks().await?;
+            }
+            if let Some(blocks_to_request) = self.blocks_to_request.as_mut() {
+                while let Some(block_info) = blocks_to_request.pop() {
+                    debug!("Requesting {:?} to Peer [{}]", block_info, self.peer_addr);
+                    framed_stream
+                        .send(Message::Request(block_info))
+                        .await
+                        .map_err(PeerConnectError::Io)?;
+                    self.outgoing_requests.insert(block_info);
+                    if self.outgoing_requests.len() >= Self::THRESHOLD {
+                        debug!("Pipeline filled for peer {}", self.peer_addr);
+                        break;
+                    }
+                }
+            } else {
+                debug!("Nothing to do now");
+            }
+        }
+        Ok(())
+    }
+
+    async fn get_tasks(&mut self) -> Result<(), PeerConnectError> {
+        let (task_tx, task_rx) = oneshot::channel();
+
+        self.session_manager
+            .send(TorrentMessage::GetTask(self.peer_addr, task_tx))
+            .await
+            .map_err(|_| PeerConnectError::SessionDisconnected)?;
+
+        self.blocks_to_request = task_rx
+            .await
+            .map_err(|_| PeerConnectError::TaskRequestFailed)?;
+        debug!(
+            "Rec response from torrent manager {:?}",
+            self.blocks_to_request
+        );
+        Ok(())
     }
 }
-
-// question to resolve
-// how does PeerInfo become aware of a piece acquistion?
-// what we do with bitfield?
-// how we select a piece to request?

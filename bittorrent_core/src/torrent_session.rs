@@ -6,22 +6,20 @@ use std::{
 
 use bytes::Bytes;
 use rand::Rng;
-use tokio::sync::{mpsc, oneshot};
-use tracing::{info, warn};
+use sha1::{Digest, Sha1};
+use tokio::sync::{broadcast, mpsc, oneshot};
+use tracing::{debug, info, warn};
 
 use crate::{
-    bitfield::BitField,
+    bitfield::{self, BitField},
     disk_io::{DiskHandle, IOMessage},
     metainfo::TorrentInfo,
     peer::PeerInfo,
     piece_cache::PieceCache,
-    piece_picker::{Block, PiecePicker},
+    piece_picker::{Block, BlockInfo, PiecePicker},
     tracker::tracker_client::TrackerClient,
     types::{InfoHash, PeerId},
 };
-
-// ---- Torrent ----
-// Internal logic for managing torrent
 
 /// Core structure for orchestration of:
 /// - Read/Write pieces to/from disk
@@ -48,6 +46,10 @@ struct TorrentHandle {
     sender: mpsc::Sender<TorrentMessage>,
 }
 
+// REFACTOR:
+// PeerBitfield and PeerHave could be merged into one message
+// of type PeerUpdate which is either a bitfield of a piece acquired
+// eitehr of both update could send us an oneshot channel where we can send if we are interested or not.
 pub enum TorrentMessage {
     PeerList(Vec<SocketAddr>),
     PeerConnected(SocketAddr),
@@ -57,7 +59,9 @@ pub enum TorrentMessage {
         peer_bf: BitField,
         interest: oneshot::Sender<bool>,
     },
+    PeerHave(SocketAddr, u32, Option<oneshot::Sender<bool>>),
     Piece(SocketAddr, Block),
+    GetTask(SocketAddr, oneshot::Sender<Option<Vec<BlockInfo>>>),
 }
 
 impl TorrentHandle {
@@ -78,7 +82,6 @@ impl Torrent {
         client_id: PeerId,
         cmd_tx: mpsc::Sender<TorrentMessage>,
     ) -> Self {
-        // We should start the piece picker
         let num_pieces = torrent.get_total_pieces();
         let piece_manager = PiecePicker::from(torrent.clone());
         let piece_cache = PieceCache::from(torrent.clone());
@@ -95,6 +98,15 @@ impl Torrent {
         }
     }
     pub async fn run(mut session: Torrent) {
+        // Suscribe to disk io
+        let info_hash = session.torrent.info_hash;
+        let name = session.torrent.info.name.clone();
+        let file_size = session.torrent.info.length as u64;
+        session
+            .disk_handler
+            .register_torrent(info_hash, name, file_size)
+            .await;
+
         let our_id = session.our_id;
         let cmd_tx = session.cmd_tx.clone();
 
@@ -111,9 +123,9 @@ impl Torrent {
             match msg {
                 TorrentMessage::PeerList(peers) => {
                     info!("Received {:?} peers from tracker", peers);
-                    for addr in peers {
+                    for addr in peers.iter() {
                         if !session.peer_list.contains(&addr) {
-                            session.connect_to_peer(addr)
+                            session.connect_to_peer(*addr)
                         }
                     }
                 }
@@ -126,8 +138,9 @@ impl Torrent {
                     // we need to re-update the tracked pieces subsrtacting the availability of
                     // pieces which disconnected peer had
                     info!("Peer disconnected");
-                    //session.piece_picker.decrement(addr);
+                    session.piece_manager.unregister_peer(&addr);
                     session.peer_list.remove(&addr);
+                    // BUG: When peer disconnets while is trying to download all the piece that we didnt receiv should be en-queued
                 }
                 TorrentMessage::PeerBitfield {
                     peer_addr,
@@ -139,20 +152,87 @@ impl Torrent {
                     let _ = interest.send(am_interested);
                 }
                 TorrentMessage::Piece(peer_addr, block) => {
+                    // Track stats of amount of downloaded for this peer
                     if let Some(piece_completed) = session.piece_cache.insert_block(block) {
-                        session.try_write_piece(piece_completed, peer_addr);
+                        debug!("Piece completed {}", piece_completed.0);
+                        session.try_write_piece(piece_completed, peer_addr).await;
+                    }
+                }
+                TorrentMessage::GetTask(peer_addr, task_sender) => {
+                    let piece_to_request = session.piece_manager.pick_piece(&peer_addr);
+                    if piece_to_request.is_none() {
+                        info!("[{}] No more piece to request from this peer", peer_addr);
+                    }
+                    if let Err(_e) = task_sender.send(piece_to_request) {
+                        warn!("Failed sending tasks we found for peer");
+                    }
+                }
+                TorrentMessage::PeerHave(peer_addr, piece_idx, resp) => {
+                    debug!("Handling peer have");
+                    session.piece_manager.update_peer(&peer_addr, piece_idx);
+                    if let Some(interest) = resp {
+                        let am_interested = session.piece_manager.check_interest(peer_addr);
+                        let _ = interest
+                            .send(am_interested)
+                            .expect("Interes resp oneshot chan closed");
                     }
                 }
             }
         }
     }
 
-    fn try_write_piece(&self, piece: (usize, Bytes), peer: SocketAddr) {
-        // validate it
-        // if not valid
-        // rank peer as possible malicious
-        // if valid then
-        // write piece to disk
+    // TODO: Move this logic to a dedicated actor
+    async fn piece_validation(&self, piece_idx: usize, piece_data: Bytes) -> bool {
+        let expected_hash = self
+            .torrent
+            .info
+            .pieces
+            .get(piece_idx)
+            .ok_or_else(|| warn!("Invalid piece index: {}", piece_idx))
+            .expect("Valid piece index")
+            .clone();
+
+        // Spawn blocking task for hash validation
+        let data_clone = piece_data.clone();
+        let hash_valid = tokio::task::spawn_blocking(move || {
+            let mut hasher = Sha1::new();
+            hasher.update(&data_clone);
+            let computed_hash: [u8; 20] = hasher.finalize().into();
+            computed_hash == expected_hash.0
+        })
+        .await
+        .unwrap_or(false);
+
+        hash_valid
+    }
+
+    async fn try_write_piece(&mut self, piece: (usize, Bytes), peer: SocketAddr) {
+        let piece_idx = piece.0;
+        let piece_data = piece.1;
+
+        // Get expected hash from torrent metadata
+        if !self.piece_validation(piece_idx, piece_data.clone()).await {
+            warn!(
+                "Invalid piece {} from peer {} it should be marked to not requested",
+                piece_idx, peer
+            );
+            // BUG: Re-queue piece or penalize peer
+            return;
+        }
+
+        // Proceed to write validated data
+        let offset: u64 = piece_idx as u64 * self.torrent.info.piece_length as u64;
+        self.disk_handler
+            .send(IOMessage::WriteBlock {
+                info_hash: self.torrent.info_hash,
+                offset,
+                data: piece_data,
+            })
+            .await;
+
+        self.piece_manager.mark_piece_downloaded(piece_idx);
+        self.bitfield.set_piece(piece_idx);
+        // TODO: Broadcast Have piece
     }
 
     fn connect_to_peer(&self, addr: SocketAddr) {
@@ -160,11 +240,19 @@ impl Torrent {
         let our_id = self.our_id;
         let info_hash = self.torrent.info_hash;
         let torrent = self.torrent.clone();
+        let bitfield = if self.bitfield.is_empty() {
+            None
+        } else {
+            Some(self.bitfield.clone())
+        };
         tokio::task::spawn(async move {
             match PeerInfo::try_connect_to_peer(&addr, our_id, info_hash).await {
                 Ok(stream) => {
                     let _ = tx.send(TorrentMessage::PeerConnected(addr)).await;
-                    if let Err(e) = PeerInfo::new(addr, tx.clone(), torrent).start(stream).await {
+                    if let Err(e) = PeerInfo::new(addr, tx.clone(), torrent)
+                        .start(stream, bitfield)
+                        .await
+                    {
                         let _ = tx.send(TorrentMessage::PeerDisconnected(addr)).await;
                         warn!("Peer [{}] Disconnected with error {}", addr, e);
                     }
@@ -176,15 +264,6 @@ impl Torrent {
             };
         });
     }
-
-    //returns a vector with information about pieces that are partially downloaded or not downloaded but partially requested
-    fn get_download_queue() -> Option<Vec<Block>> {
-        todo!()
-    }
-
-    fn read_piece() {}
-
-    fn write_piece() {}
 }
 
 // ---- Client ----

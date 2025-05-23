@@ -1,4 +1,4 @@
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,6 +25,10 @@ impl BitField {
             total_pieces,
             inner: vec![0u8; num_bytes],
         }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.inner.iter().all(|&b| b == 0)
     }
 
     pub fn try_from(bytes: Bytes, num_pieces: usize) -> Result<Self, BitfieldError> {
@@ -62,8 +66,8 @@ impl BitField {
         })
     }
 
-    pub fn get_inner(&self) -> &[u8] {
-        self.inner.as_slice()
+    pub fn as_bytes(&self) -> Bytes {
+        Bytes::copy_from_slice(&self.inner)
     }
 
     pub fn has_piece(&self, index: usize) -> bool {
@@ -172,16 +176,5 @@ mod tests {
         let bytes = Bytes::from(vec![0b11111111, 0b00000001]);
         let result = BitField::try_from(bytes, 8);
         assert_eq!(result.unwrap_err(), BitfieldError::NonZeroSpareBits);
-    }
-
-    #[test]
-    fn test_get_inner() {
-        let bitfield = BitField::new(5);
-        assert_eq!(bitfield.get_inner(), &[0u8]);
-        let mut bitfield_2 = BitField::new(12);
-        bitfield_2.set_piece(0);
-        bitfield_2.set_piece(8);
-        // 0th bit is 1 (10000000), 8th bit is 1 (10000000 in second byte)
-        assert_eq!(bitfield_2.get_inner(), &[0b10000000, 0b10000000]);
     }
 }

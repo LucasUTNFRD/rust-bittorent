@@ -40,20 +40,20 @@ impl PieceCache {
     pub fn insert_block(&mut self, block: Block) -> Option<(usize, Bytes)> {
         let index = block.index as usize;
 
-        if let Some(piece) = self.piece_map.get_mut(&index) {
-            let offset = block.begin as usize;
-            piece.buffer[offset..offset + block.data.len()].copy_from_slice(&block.data);
-            piece.downloaded += block.data.len();
-            if piece.downloaded == piece.piece_length {
-                // Clone the buffer before removing the piece from the map
-                let completed_piece = piece.buffer.clone().freeze();
+        let piece = self.piece_map.get_mut(&index)?;
+        let offset = block.begin as usize;
+        piece.buffer[offset..offset + block.data.len()].copy_from_slice(&block.data);
+        piece.downloaded += block.data.len();
 
-                // Remove the piece from the cache
-                self.piece_map.remove(&index);
+        if piece.downloaded == piece.piece_length {
+            // Clone the buffer before removing the piece from the map
+            let completed_piece = piece.buffer.clone().freeze();
 
-                return Some((index, completed_piece));
-            }
-        };
+            // Remove the piece from the cache
+            self.piece_map.remove(&index);
+
+            return Some((index, completed_piece));
+        }
         None
     }
 }

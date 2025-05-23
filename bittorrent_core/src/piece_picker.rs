@@ -1,6 +1,8 @@
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
 use bytes::Bytes;
+use rand::{rng, seq::IteratorRandom};
+use tracing::{debug, info, warn};
 
 use crate::{bitfield::BitField, metainfo::TorrentInfo};
 
@@ -12,20 +14,24 @@ pub struct PiecePicker {
     pick_strategy: Strategy,
 }
 
+#[derive(Debug)]
 struct PieceIndex {
     availability: usize,
     partial: bool,
     status: PieceStatus,
-    // index:
+    size: u32,
+    // index: usize
+    // blocks: Vec<BlockInfo>
 }
 
-#[derive(Eq, PartialEq)]
-enum PieceStatus {
+#[derive(Debug, Eq, PartialEq)]
+pub enum PieceStatus {
     NotRequested,
     Requested,
     Download,
 }
 
+#[derive(Eq, PartialEq)]
 enum Strategy {
     RandomFirst,
     RarestFirst,
@@ -35,10 +41,11 @@ impl From<Arc<TorrentInfo>> for PiecePicker {
     fn from(torrent: Arc<TorrentInfo>) -> Self {
         let total_pieces = torrent.get_total_pieces();
         let pieces = (0..total_pieces)
-            .map(|_| PieceIndex {
+            .map(|piece_idx| PieceIndex {
                 availability: 0,
                 partial: false,
                 status: PieceStatus::NotRequested,
+                size: torrent.get_piece_len(piece_idx),
             })
             .collect();
         Self {
@@ -63,24 +70,52 @@ impl PiecePicker {
         self.peer_bitifield.insert(peer, bitfield);
     }
 
-    pub fn update_peer(&mut self, peer: SocketAddr, piece_index: u32) {
-        if let Some(bitfield) = self.peer_bitifield.get_mut(&peer) {
+    pub fn update_peer(&mut self, peer: &SocketAddr, piece_index: u32) {
+        if let Some(bitfield) = self.peer_bitifield.get_mut(peer) {
             //  avoid double counting
             if !bitfield.has_piece(piece_index as usize) {
                 bitfield.set_piece(piece_index as usize);
                 self.pieces[piece_index as usize].availability += 1;
             }
+        } else {
+            warn!(
+                "Received a have message and didnt have the peeer bf, we should create an empty bf all zeroed"
+            );
         }
     }
 
-    pub fn unregister_peer(&mut self, peer: SocketAddr) {
-        if let Some(bitfield) = self.peer_bitifield.remove(&peer) {
+    // pub fn mark_piece(&mut self, )
+
+    pub fn unregister_peer(&mut self, peer: &SocketAddr) {
+        if let Some(bitfield) = self.peer_bitifield.remove(peer) {
             for (i, piece) in self.pieces.iter_mut().enumerate() {
                 // piece.availability > 0 in case of underflow
                 if bitfield.has_piece(i) && piece.availability > 0 {
                     piece.availability -= 1;
                 }
             }
+        }
+    }
+
+    fn mark_piece(&mut self, piece_idx: usize, new_state: PieceStatus) {
+        if let Some(piece) = self.pieces.get_mut(piece_idx) {
+            debug!("piece {} {:?} -> {:?}", piece_idx, piece.status, new_state);
+            piece.status = new_state;
+        }
+    }
+
+    pub fn mark_piece_downloaded(&mut self, piece_idx: usize) {
+        self.mark_piece(piece_idx, PieceStatus::Download);
+        if self.pick_strategy != Strategy::RarestFirst
+            && self
+                .pieces
+                .iter()
+                .filter(|&p| p.status == PieceStatus::Download)
+                .count()
+                == 4
+        {
+            info!("Rarest First strategy");
+            self.pick_strategy = Strategy::RarestFirst
         }
     }
 
@@ -94,26 +129,50 @@ impl PiecePicker {
         })
     }
 
-    fn downloaded_pieces_count(&self) -> usize {
+    pub fn all_pieces_downloaded(&self) -> bool {
         self.pieces
             .iter()
-            .filter(|piece| piece.status == PieceStatus::Download)
-            .count()
+            .all(|p| p.status == PieceStatus::Download)
     }
 
-    pub fn pick_piece(&self, peer: &SocketAddr) {
-        // TODO:
-        // we need to return a vec of block info to be sent to peer as request of pieces
-        // here is were piece selection algorithm takes place
-        // first four pieces are selected randomly from the pieces the peer has.
-        // as soon as we receive the piece number four we switch to rarest first
-        // here the priority is
-        // and requested piece which was dropped by a peer and was left incompleted (Requested And Partial)
-        // then a rarest piece not requested yet
+    fn get_blocks(&self, piece_idx: u32) -> Vec<BlockInfo> {
+        let piece_size = self.pieces[piece_idx as usize].size;
+        (0..piece_size)
+            .step_by(Self::BLOCK_SIZE as usize)
+            .map(|offset| BlockInfo {
+                index: piece_idx,
+                begin: offset,
+                length: Self::BLOCK_SIZE.min(piece_size - offset),
+            })
+            .collect()
+    }
+
+    pub fn pick_piece(&mut self, peer: &SocketAddr) -> Option<Vec<BlockInfo>> {
+        let peer_bitfield = self.peer_bitifield.get(peer)?;
+        let candidate_pieces: Vec<usize> = self
+            .pieces
+            .iter()
+            .enumerate()
+            .filter(|&(i, p)| p.status == PieceStatus::NotRequested && peer_bitfield.has_piece(i)) // piece not request and peer has
+            .map(|(i, _)| i)
+            .collect();
+        debug!("Candidate pieces {:?}", candidate_pieces);
+        let piece_index = match self.pick_strategy {
+            Strategy::RandomFirst => candidate_pieces.iter().choose(&mut rng())?,
+            Strategy::RarestFirst => candidate_pieces
+                .iter()
+                .min_by_key(|&i| self.pieces[*i].availability)?,
+        };
+
+        // NotRequested -> Requested
+        self.mark_piece(*piece_index, PieceStatus::Requested);
+
+        // Some(self.pieces[*piece_index].blocks)
+        Some(self.get_blocks(*piece_index as u32))
     }
 }
 
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
 pub struct BlockInfo {
     pub index: u32,
     pub begin: u32,
